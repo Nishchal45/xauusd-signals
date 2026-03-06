@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XAU/USD App — Full Deployment Guide</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Sora:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0e17;--panel:#111827;--card:#161f2e;--border:#1e2d42;
+  --text:#e8f0fe;--muted:#6b7fa3;--dim:#253347;
+  --gold:#f5a623;--green:#10b981;--red:#ef4444;--blue:#3b82f6;
+  --teal:#06b6d4;--purple:#8b5cf6;
+}
+body{background:var(--bg);color:var(--text);font-family:'Sora',sans-serif;
+     line-height:1.6;padding:0 0 60px}
+
+/* ── HERO ── */
+.hero{background:linear-gradient(160deg,#0f1a2e 0%,#0a0e17 60%);
+      padding:40px 20px 32px;text-align:center;border-bottom:1px solid var(--border);
+      position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-60px;left:50%;transform:translateX(-50%);
+  width:400px;height:400px;border-radius:50%;
+  background:radial-gradient(circle,rgba(245,166,35,.08) 0%,transparent 70%);pointer-events:none}
+.hero-title{font-family:'Bebas Neue';font-size:38px;letter-spacing:5px;color:var(--gold);line-height:1}
+.hero-sub{font-family:'DM Mono';font-size:11px;color:var(--muted);letter-spacing:3px;margin-top:6px}
+.hero-badges{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:16px}
+.badge{font-family:'DM Mono';font-size:10px;padding:4px 10px;border-radius:4px;letter-spacing:1px}
+.badge-green{background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.25)}
+.badge-gold{background:rgba(245,166,35,.12);color:var(--gold);border:1px solid rgba(245,166,35,.25)}
+.badge-blue{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+
+/* ── LAYOUT ── */
+.content{max-width:680px;margin:0 auto;padding:0 16px}
+
+/* ── OVERVIEW FLOW ── */
+.flow{display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;
+      margin:28px 0;padding:0 8px}
+.flow-step{background:var(--card);border:1px solid var(--border);border-radius:10px;
+           padding:12px 14px;text-align:center;min-width:110px;flex:1;max-width:140px}
+.flow-icon{font-size:22px;margin-bottom:4px}
+.flow-name{font-family:'DM Mono';font-size:10px;color:var(--muted);letter-spacing:1px}
+.flow-label{font-size:12px;font-weight:600;color:var(--text);margin-top:2px}
+.flow-arrow{color:var(--muted);font-size:18px;padding:0 4px;flex-shrink:0}
+
+/* ── PHASE HEADER ── */
+.phase{margin:32px 0 0}
+.phase-header{display:flex;align-items:center;gap:12px;padding:14px 18px;
+              border-radius:12px 12px 0 0;margin-bottom:0}
+.phase-num{font-family:'Bebas Neue';font-size:32px;line-height:1;min-width:32px}
+.phase-title{font-size:17px;font-weight:700}
+.phase-sub{font-size:11px;margin-top:2px;font-family:'DM Mono';letter-spacing:1px}
+
+.phase-github .phase-header{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.25)}
+.phase-github .phase-num{color:#a78bfa}
+.phase-render .phase-header{background:rgba(59,130,246,.1);border:1px solid rgba(59,130,246,.25)}
+.phase-render .phase-num{color:#60a5fa}
+.phase-uptime .phase-header{background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25)}
+.phase-uptime .phase-num{color:#34d399}
+.phase-phone  .phase-header{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.25)}
+.phase-phone  .phase-num{color:var(--gold)}
+
+/* ── STEPS ── */
+.steps{background:var(--card);border:1px solid var(--border);border-top:none;
+       border-radius:0 0 12px 12px;padding:6px 0 10px}
+.step{padding:14px 18px;border-bottom:1px solid var(--dim);display:flex;gap:14px;align-items:flex-start}
+.step:last-child{border-bottom:none}
+.step-n{font-family:'Bebas Neue';font-size:20px;min-width:24px;color:var(--muted);line-height:1.3;flex-shrink:0}
+.step-body{flex:1}
+.step-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px}
+.step-desc{font-size:12.5px;color:var(--muted);line-height:1.65}
+.step-desc b{color:var(--text)}
+.step-desc code{font-family:'DM Mono';background:var(--dim);padding:2px 6px;
+                border-radius:3px;font-size:11.5px;color:#93c5fd}
+
+/* ── CODE BLOCK ── */
+.code-block{background:#0a0e17;border:1px solid var(--border);border-radius:8px;
+            padding:12px 14px;margin:10px 0;font-family:'DM Mono';font-size:11.5px;
+            color:#93c5fd;line-height:1.8;overflow-x:auto}
+.code-block .comment{color:var(--muted)}
+.code-block .val{color:#34d399}
+
+/* ── TABLE ── */
+.settings-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12.5px}
+.settings-table th{background:var(--dim);color:var(--muted);font-family:'DM Mono';
+                   font-size:10px;letter-spacing:1px;padding:8px 12px;text-align:left}
+.settings-table td{padding:9px 12px;border-bottom:1px solid var(--dim);vertical-align:top}
+.settings-table tr:last-child td{border-bottom:none}
+.settings-table .field{color:var(--text);font-weight:600;font-family:'DM Mono';font-size:11.5px}
+.settings-table .value{color:#34d399;font-family:'DM Mono';font-size:11.5px}
+.settings-table .note{color:var(--muted);font-size:11px;margin-top:3px}
+
+/* ── HIGHLIGHT BOX ── */
+.tip{border-radius:8px;padding:12px 14px;margin:10px 0;font-size:12.5px;display:flex;gap:10px;align-items:flex-start}
+.tip-warn{background:rgba(245,166,35,.08);border-left:3px solid var(--gold)}
+.tip-good{background:rgba(16,185,129,.08);border-left:3px solid var(--green)}
+.tip-info{background:rgba(59,130,246,.08);border-left:3px solid var(--blue)}
+.tip-icon{font-size:16px;flex-shrink:0;margin-top:1px}
+.tip-text{color:var(--muted);line-height:1.6}
+.tip-text b{color:var(--text)}
+
+/* ── RESULT BOX ── */
+.result-box{background:linear-gradient(135deg,rgba(16,185,129,.08),var(--card));
+            border:1px solid rgba(16,185,129,.3);border-radius:12px;
+            padding:20px;margin:28px 0;text-align:center}
+.result-url{font-family:'DM Mono';font-size:15px;color:#34d399;margin:8px 0;
+            word-break:break-all;background:var(--bg);padding:10px 14px;border-radius:6px}
+.result-title{font-family:'Bebas Neue';font-size:20px;color:#34d399;letter-spacing:3px}
+
+/* ── FINAL STACK ── */
+.stack{display:grid;grid-template-columns:1fr;gap:8px;margin:16px 0}
+.stack-item{background:var(--card);border:1px solid var(--border);border-radius:8px;
+            padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+.stack-service{font-size:13px;font-weight:600}
+.stack-role{font-size:11px;color:var(--muted);font-family:'DM Mono';margin-top:2px}
+.stack-cost{font-family:'DM Mono';font-size:12px;padding:3px 9px;border-radius:4px;
+            background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.2)}
+
+/* ── SIGNAL PREVIEW ── */
+.signal-preview{background:rgba(16,185,129,.07);border:1px solid rgba(16,185,129,.25);
+                border-radius:10px;padding:16px;margin:16px 0}
+.sp-header{font-family:'Bebas Neue';font-size:28px;color:#10b981;letter-spacing:4px;margin-bottom:10px}
+.sp-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sp-item{background:rgba(0,0,0,.3);border-radius:6px;padding:9px 11px}
+.sp-lbl{font-family:'DM Mono';font-size:9px;color:var(--muted);letter-spacing:2px;margin-bottom:3px}
+.sp-val{font-family:'Bebas Neue';font-size:18px;letter-spacing:1px}
+
+/* ── TROUBLESHOOT ── */
+.trouble-row{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--dim);font-size:12.5px}
+.trouble-row:last-child{border-bottom:none}
+.trouble-prob{color:#fca5a5;min-width:160px;flex-shrink:0}
+.trouble-fix{color:var(--muted)}
+.trouble-fix b{color:var(--text)}
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-title">DEPLOYMENT GUIDE</div>
+  <div class="hero-sub">XAU/USD LIVE SIGNAL APP · FREE CLOUD SETUP</div>
+  <div class="hero-badges">
+    <span class="badge badge-green">✓ 100% FREE</span>
+    <span class="badge badge-gold">✓ LIVE yfinance DATA</span>
+    <span class="badge badge-blue">✓ PHONE READY</span>
+    <span class="badge badge-green">✓ ALWAYS AWAKE</span>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- OVERVIEW FLOW -->
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-icon">🐙</div>
+      <div class="flow-name">STEP 1</div>
+      <div class="flow-label">GitHub</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon">🚀</div>
+      <div class="flow-name">STEP 2</div>
+      <div class="flow-label">Render</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon">⏱</div>
+      <div class="flow-name">STEP 3</div>
+      <div class="flow-label">UptimeRobot</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon">📱</div>
+      <div class="flow-name">STEP 4</div>
+      <div class="flow-label">Your Phone</div>
+    </div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- PHASE 1 — GITHUB                                   -->
+  <!-- ─────────────────────────────────────────────────── -->
+  <div class="phase phase-github">
+    <div class="phase-header">
+      <div class="phase-num">1</div>
+      <div>
+        <div class="phase-title">Create GitHub Repository</div>
+        <div class="phase-sub">github.com · free · 2 minutes</div>
+      </div>
+    </div>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-n">1</div>
+        <div class="step-body">
+          <div class="step-title">Go to github.com and sign in</div>
+          <div class="step-desc">Create a free account if you don't have one. Use any email — no credit card needed.</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">2</div>
+        <div class="step-body">
+          <div class="step-title">Create a new repository</div>
+          <div class="step-desc">
+            Click the <b>"+"</b> icon (top-right corner) → <b>"New repository"</b><br><br>
+            Fill in:
+          </div>
+          <div class="code-block">
+<span class="comment">Repository name:</span>  <span class="val">xauusd-signals</span>
+<span class="comment">Visibility:</span>       <span class="val">Public</span>  ← required for free Render
+<span class="comment">Add README:</span>       <span class="val">✅ check this box</span>
+          </div>
+          <div class="step-desc">Click <b>"Create repository"</b></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">3</div>
+        <div class="step-body">
+          <div class="step-title">Upload the 4 app files</div>
+          <div class="step-desc">
+            In your new repo, click <b>"Add file"</b> → <b>"Upload files"</b><br><br>
+            Drag &amp; drop these 4 files from your download:
+          </div>
+          <div class="code-block">
+<span class="val">main.py</span>           <span class="comment"># the signal engine + dashboard</span>
+<span class="val">requirements.txt</span>  <span class="comment"># Python packages list</span>
+<span class="val">render.yaml</span>       <span class="comment"># Render deploy config</span>
+<span class="val">README.md</span>         <span class="comment"># description</span>
+          </div>
+          <div class="step-desc">Scroll down → click <b>"Commit changes"</b></div>
+          <div class="tip tip-good">
+            <div class="tip-icon">✅</div>
+            <div class="tip-text">Your repo should now show 4 files. That's all GitHub needs.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- PHASE 2 — RENDER                                   -->
+  <!-- ─────────────────────────────────────────────────── -->
+  <div class="phase phase-render">
+    <div class="phase-header">
+      <div class="phase-num">2</div>
+      <div>
+        <div class="phase-title">Deploy on Render.com</div>
+        <div class="phase-sub">render.com · free · 5 minutes</div>
+      </div>
+    </div>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-n">1</div>
+        <div class="step-body">
+          <div class="step-title">Sign up at render.com</div>
+          <div class="step-desc">Go to <b>render.com</b> → click <b>"Get Started for Free"</b><br>
+          Sign up with your <b>GitHub account</b> (easiest — links automatically)</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">2</div>
+        <div class="step-body">
+          <div class="step-title">Create a new Web Service</div>
+          <div class="step-desc">
+            In your Render dashboard:<br>
+            Click <b>"New +"</b> → <b>"Web Service"</b>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">3</div>
+        <div class="step-body">
+          <div class="step-title">Connect your GitHub repository</div>
+          <div class="step-desc">
+            Click <b>"Connect account"</b> → authorize GitHub access<br>
+            Search for <b>xauusd-signals</b> → click <b>"Connect"</b>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">4</div>
+        <div class="step-body">
+          <div class="step-title">Configure the deployment settings</div>
+          <div class="step-desc">Fill in exactly as shown:</div>
+          <table class="settings-table">
+            <tr><th>FIELD</th><th>VALUE</th></tr>
+            <tr>
+              <td><span class="field">Name</span></td>
+              <td><span class="value">xauusd-signals</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Region</span></td>
+              <td><span class="value">Ohio (US East)</span> <div class="note">or closest to you</div></td>
+            </tr>
+            <tr>
+              <td><span class="field">Branch</span></td>
+              <td><span class="value">main</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Runtime</span></td>
+              <td><span class="value">Python 3</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Build Command</span></td>
+              <td><span class="value">pip install -r requirements.txt</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Start Command</span></td>
+              <td><span class="value">uvicorn main:app --host 0.0.0.0 --port $PORT</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Instance Type</span></td>
+              <td><span class="value">Free</span> <div class="note">← make sure it says Free</div></td>
+            </tr>
+          </table>
+          <div class="step-desc">Click <b>"Create Web Service"</b></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">5</div>
+        <div class="step-body">
+          <div class="step-title">Wait for the build to finish (~3 minutes)</div>
+          <div class="step-desc">
+            Render will install packages and start your server.<br>
+            You'll see log output. Wait until you see:
+          </div>
+          <div class="code-block">
+<span class="val">✓ Build successful</span>
+<span class="val">✓ Deploy successful</span>
+<span class="comment">Your service is live 🎉</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">6</div>
+        <div class="step-body">
+          <div class="step-title">Copy your live URL</div>
+          <div class="step-desc">
+            At the top of your Render dashboard you'll see a URL like:
+          </div>
+          <div class="code-block"><span class="val">https://xauusd-signals.onrender.com</span></div>
+          <div class="step-desc"><b>Copy this URL</b> — you'll need it for UptimeRobot and your phone.</div>
+          <div class="tip tip-info">
+            <div class="tip-icon">💡</div>
+            <div class="tip-text"><b>Test it now:</b> Open the URL in your browser. You should see the gold signal dashboard loading live data.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- PHASE 3 — UPTIMEROBOT                              -->
+  <!-- ─────────────────────────────────────────────────── -->
+  <div class="phase phase-uptime">
+    <div class="phase-header">
+      <div class="phase-num">3</div>
+      <div>
+        <div class="phase-title">Set Up UptimeRobot</div>
+        <div class="phase-sub">uptimerobot.com · free · keeps app always awake</div>
+      </div>
+    </div>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-n">–</div>
+        <div class="step-body">
+          <div class="tip tip-warn">
+            <div class="tip-icon">⚠️</div>
+            <div class="tip-text"><b>Why you need this:</b> Render's free tier puts your app to sleep after 15 minutes of no traffic. The first load after sleep takes 30+ seconds. UptimeRobot pings your app every 5 minutes to keep it awake 24/7 — for free.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">1</div>
+        <div class="step-body">
+          <div class="step-title">Create a free account</div>
+          <div class="step-desc">
+            Go to <b>uptimerobot.com</b> → click <b>"Register for FREE"</b><br>
+            Sign up with your email. No credit card needed.<br>
+            Verify your email address.
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">2</div>
+        <div class="step-body">
+          <div class="step-title">Add a new monitor</div>
+          <div class="step-desc">
+            In your UptimeRobot dashboard:<br>
+            Click <b>"+ Add New Monitor"</b>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">3</div>
+        <div class="step-body">
+          <div class="step-title">Configure the monitor exactly like this</div>
+          <table class="settings-table">
+            <tr><th>FIELD</th><th>VALUE</th></tr>
+            <tr>
+              <td><span class="field">Monitor Type</span></td>
+              <td><span class="value">HTTP(s)</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">Friendly Name</span></td>
+              <td><span class="value">XAU/USD Signal App</span></td>
+            </tr>
+            <tr>
+              <td><span class="field">URL (or IP)</span></td>
+              <td>
+                <span class="value">https://xauusd-signals.onrender.com/health</span>
+                <div class="note">← paste YOUR Render URL + /health at the end</div>
+              </td>
+            </tr>
+            <tr>
+              <td><span class="field">Monitoring Interval</span></td>
+              <td><span class="value">5 minutes</span> <div class="note">free plan minimum</div></td>
+            </tr>
+            <tr>
+              <td><span class="field">Alert Contacts</span></td>
+              <td><span class="value">Your email</span> <div class="note">optional — alerts if app goes down</div></td>
+            </tr>
+          </table>
+          <div class="tip tip-info">
+            <div class="tip-icon">💡</div>
+            <div class="tip-text">The <code>/health</code> endpoint is a lightweight ping route built into the app — it returns instantly without fetching gold data, so it's perfect for keep-alive pings.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">4</div>
+        <div class="step-body">
+          <div class="step-title">Click "Create Monitor"</div>
+          <div class="step-desc">
+            UptimeRobot will immediately do a first check.<br>
+            Within 1 minute you'll see a green <b>"UP"</b> status badge.<br><br>
+            That's it — your app will now stay awake 24/7.
+          </div>
+          <div class="tip tip-good">
+            <div class="tip-icon">✅</div>
+            <div class="tip-text"><b>Green badge = app is live and awake.</b> UptimeRobot will email you if it ever goes down.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">5</div>
+        <div class="step-body">
+          <div class="step-title">Verify the health endpoint works</div>
+          <div class="step-desc">
+            Open this URL in your browser (replace with your actual URL):
+          </div>
+          <div class="code-block"><span class="val">https://xauusd-signals.onrender.com/health</span></div>
+          <div class="step-desc">You should see:</div>
+          <div class="code-block"><span class="val">{"status": "ok", "time": "2024-01-15T10:30:00Z"}</span></div>
+          <div class="step-desc">If you see this, UptimeRobot will monitor it successfully.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- PHASE 4 — PHONE                                    -->
+  <!-- ─────────────────────────────────────────────────── -->
+  <div class="phase phase-phone">
+    <div class="phase-header">
+      <div class="phase-num">4</div>
+      <div>
+        <div class="phase-title">Add to Your Phone</div>
+        <div class="phase-sub">works like a native app · no app store needed</div>
+      </div>
+    </div>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-n">📱</div>
+        <div class="step-body">
+          <div class="step-title">iPhone / Safari</div>
+          <div class="step-desc">
+            1. Open your Render URL in <b>Safari</b><br>
+            2. Tap the <b>Share button</b> (square with arrow pointing up)<br>
+            3. Scroll down → tap <b>"Add to Home Screen"</b><br>
+            4. Name it <b>"Gold Signal"</b> → tap <b>"Add"</b><br><br>
+            A gold icon now appears on your home screen — opens like an app.
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n">📱</div>
+        <div class="step-body">
+          <div class="step-title">Android / Chrome</div>
+          <div class="step-desc">
+            1. Open your Render URL in <b>Chrome</b><br>
+            2. Tap the <b>three dots menu</b> (⋮) top right<br>
+            3. Tap <b>"Add to Home screen"</b><br>
+            4. Name it <b>"Gold Signal"</b> → tap <b>"Add"</b><br><br>
+            Icon appears on your home screen instantly.
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- RESULT -->
+  <div class="result-box">
+    <div class="result-title">🎉 YOUR APP IS LIVE</div>
+    <div style="font-size:12px;color:var(--muted);margin:6px 0">your personal signal URL:</div>
+    <div class="result-url">https://xauusd-signals.onrender.com</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:8px">Open this on your phone anytime to get the live signal</div>
+  </div>
+
+  <!-- SIGNAL PREVIEW -->
+  <div style="margin:24px 0 8px;font-family:'DM Mono';font-size:9px;color:var(--muted);letter-spacing:2px">
+    WHAT YOU'LL SEE WHEN A SIGNAL FIRES
+  </div>
+  <div class="signal-preview">
+    <div class="sp-header">▲ LONG</div>
+    <div class="sp-grid">
+      <div class="sp-item">
+        <div class="sp-lbl">ENTRY</div>
+        <div class="sp-val" style="color:#f1f5f9">$2,387.50</div>
+      </div>
+      <div class="sp-item">
+        <div class="sp-lbl">STOP</div>
+        <div class="sp-val" style="color:#ef4444">$2,366.20</div>
+      </div>
+      <div class="sp-item">
+        <div class="sp-lbl">TARGET</div>
+        <div class="sp-val" style="color:#10b981">$2,429.10</div>
+      </div>
+      <div class="sp-item">
+        <div class="sp-lbl">RR RATIO</div>
+        <div class="sp-val" style="color:#f5a623">1 : 2</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULL STACK -->
+  <div style="margin:28px 0 8px;font-family:'DM Mono';font-size:9px;color:var(--muted);letter-spacing:2px">
+    YOUR COMPLETE FREE STACK
+  </div>
+  <div class="stack">
+    <div class="stack-item">
+      <div>
+        <div class="stack-service">🐙 GitHub</div>
+        <div class="stack-role">Stores your code · auto-deploys on changes</div>
+      </div>
+      <div class="stack-cost">FREE</div>
+    </div>
+    <div class="stack-item">
+      <div>
+        <div class="stack-service">🚀 Render.com</div>
+        <div class="stack-role">Runs Python · serves dashboard · fetches gold data</div>
+      </div>
+      <div class="stack-cost">FREE</div>
+    </div>
+    <div class="stack-item">
+      <div>
+        <div class="stack-service">⏱ UptimeRobot</div>
+        <div class="stack-role">Pings /health every 5 min · keeps app awake 24/7</div>
+      </div>
+      <div class="stack-cost">FREE</div>
+    </div>
+    <div class="stack-item">
+      <div>
+        <div class="stack-service">📈 Yahoo Finance</div>
+        <div class="stack-role">Live XAU/USD 1H price data via yfinance</div>
+      </div>
+      <div class="stack-cost">FREE</div>
+    </div>
+  </div>
+
+  <!-- TROUBLESHOOTING -->
+  <div style="margin:28px 0 8px;font-family:'DM Mono';font-size:9px;color:var(--muted);letter-spacing:2px">
+    TROUBLESHOOTING
+  </div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px">
+    <div class="trouble-row">
+      <div class="trouble-prob">App loads slowly (30s)</div>
+      <div class="trouble-fix">UptimeRobot not set up yet, or just started. <b>Normal — wait for first ping.</b></div>
+    </div>
+    <div class="trouble-row">
+      <div class="trouble-prob">UptimeRobot shows DOWN</div>
+      <div class="trouble-fix">Check Render logs. Usually a package install issue. <b>Redeploy from Render dashboard.</b></div>
+    </div>
+    <div class="trouble-row">
+      <div class="trouble-prob">"Not enough data" error</div>
+      <div class="trouble-fix">Yahoo Finance timeout. <b>Refresh the page in 60 seconds.</b></div>
+    </div>
+    <div class="trouble-row">
+      <div class="trouble-prob">Build failed on Render</div>
+      <div class="trouble-fix">Check the build log. Usually a package version mismatch. <b>Re-upload requirements.txt</b></div>
+    </div>
+    <div class="trouble-row">
+      <div class="trouble-prob">Wrong gold price showing</div>
+      <div class="trouble-fix">Market closed (weekend/holiday). <b>Shows last available close — expected.</b></div>
+    </div>
+    <div class="trouble-row">
+      <div class="trouble-prob">Want to change risk %</div>
+      <div class="trouble-fix">Edit <code>main.py</code> on GitHub, change <code>risk_usd = 100</code>. <b>Render auto-redeploys in 2 min.</b></div>
+    </div>
+  </div>
+
+  <div style="margin-top:40px;font-family:'DM Mono';font-size:9px;color:var(--dim);text-align:center;letter-spacing:1px;border-top:1px solid var(--border);padding-top:16px">
+    STRATEGY: BB(20,2)+EMA200+RSI(7) · BACKTESTED WR ~70% · PF ~4.9 · 1:2 RR<br>
+    FOR MANUAL TRADING REFERENCE ONLY — NOT FINANCIAL ADVICE
+  </div>
+
+</div>
+</body>
+</html>
