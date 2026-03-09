@@ -7,4 +7,9 @@ services:
     plan: free
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11.9
+```
+
+**3. Add `.python-version`** — create a new file called exactly `.python-version` (with the dot) containing just:
+```
+3.11.9
