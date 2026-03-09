@@ -1,18 +1,29 @@
 """
-XAU/USD Live Signal Server  —  v3  (Telegram Push Notifications)
-=================================================================
-HOW IT WORKS:
-  • Background job checks for signals every 60 minutes automatically
-  • Sends instant Telegram push notification when LONG or SHORT fires
-  • Also warns when 3/4 conditions are met (signal forming)
-  • Sends "signal cleared" when trade setup disappears
-  • Serves mobile dashboard at  /
-  • UptimeRobot keep-alive at   /health
-  • Test your Telegram at       /api/test-notification
+XAU/USD Live Signal Server  —  v4  (Twelve Data)
+=================================================
+Switched from yfinance (gold futures GC=F) to Twelve Data
+which provides true XAU/USD spot price — the actual forex
+gold rate your broker quotes, not the futures contract.
 
-ENVIRONMENT VARIABLES (set in Render dashboard):
-  TELEGRAM_BOT_TOKEN   → get from @BotFather on Telegram
-  TELEGRAM_CHAT_ID     → get from @userinfobot on Telegram
+HOW IT WORKS:
+  • Fetches real XAU/USD spot 1H OHLCV from Twelve Data API
+  • Background job checks for signals every 60 minutes
+  • Sends instant Telegram push notification on LONG / SHORT
+  • Also warns when 3/4 conditions met (signal forming)
+  • Sends "signal cleared" when setup disappears
+  • Mobile dashboard at  /
+  • UptimeRobot ping at  /health
+  • Test Telegram at     /api/test-notification
+
+ENVIRONMENT VARIABLES — set all 3 in Render dashboard:
+  TWELVE_DATA_KEY      → free from twelvedata.com (no card)
+  TELEGRAM_BOT_TOKEN   → from @BotFather on Telegram
+  TELEGRAM_CHAT_ID     → from @userinfobot on Telegram
+
+FREE TIER LIMITS (Twelve Data Basic — free forever):
+  8 API credits/minute, 800/day
+  Each XAU/USD time_series call = 1 credit
+  We call once per hour = 24 calls/day  ✅ well within limit
 """
 
 from fastapi import FastAPI
@@ -27,16 +38,84 @@ import uvicorn, os, asyncio, httpx, logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger("xauusd")
 
-try:
-    import yfinance as yf
-    HAS_YF = True
-except Exception:
-    HAS_YF = False
+# ── Config from Render environment variables ──────────────────────────────────
+TD_KEY      = os.environ.get("TWELVE_DATA_KEY",      "")   # ← Twelve Data API key
+TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN",   "")
+TG_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID",     "")
+CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour default
 
-# ── Telegram config ───────────────────────────────────────────────────────────
-TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN",  "")
-TG_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID",    "")
-CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour
+
+# ═══════════════════════════════════════════════════════════════════
+#  TWELVE DATA  —  XAU/USD SPOT DATA FETCHER
+# ═══════════════════════════════════════════════════════════════════
+def fetch_xauusd() -> tuple:
+    """
+    Fetch XAU/USD 1H candles from Twelve Data.
+    Returns (DataFrame, error_string_or_None).
+
+    Twelve Data endpoint: /time_series
+      symbol   = XAU/USD  (true spot gold, not futures)
+      interval = 1h
+      outputsize = 500  (500 hourly bars ≈ 3 weeks, enough for EMA200)
+
+    Note: EMA200 needs 200+ bars to be reliable.
+    We request 500 bars to give it plenty of warmup.
+    """
+    if not TD_KEY:
+        return None, "TWELVE_DATA_KEY environment variable not set"
+
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol":     "XAU/USD",
+        "interval":   "1h",
+        "outputsize": "5000",    # max on free tier per call
+        "order":      "ASC",     # oldest first → matches our indicator logic
+        "apikey":     TD_KEY,
+    }
+
+    try:
+        import requests as req
+        r = req.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return None, f"HTTP error: {e}"
+
+    # Check for API-level errors
+    if data.get("status") == "error":
+        code = data.get("code", "")
+        msg  = data.get("message", "Unknown error")
+        # Rate limit hit → log but don't crash, retry next cycle
+        if code in (429, "429"):
+            return None, f"Rate limit hit — will retry next cycle"
+        return None, f"Twelve Data error {code}: {msg}"
+
+    values = data.get("values")
+    if not values:
+        return None, "No values returned from Twelve Data"
+
+    try:
+        rows = []
+        for v in values:
+            rows.append({
+                "open":   float(v["open"]),
+                "high":   float(v["high"]),
+                "low":    float(v["low"]),
+                "close":  float(v["close"]),
+            })
+        df = pd.DataFrame(rows, index=pd.to_datetime([v["datetime"] for v in values]))
+        df = df.sort_index()   # ensure chronological order
+        df = df.dropna()
+
+        if len(df) < 220:
+            return None, f"Only {len(df)} bars returned — need 220+ for reliable signals"
+
+        log.info(f"Twelve Data: {len(df)} XAU/USD 1H bars loaded "
+                 f"({df.index[0].date()} → {df.index[-1].date()})")
+        return df, None
+
+    except Exception as e:
+        return None, f"Data parsing error: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -66,24 +145,16 @@ def atr(df, p=14):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  SIGNAL ENGINE
+#  SIGNAL ENGINE  (BB Squeeze Breakout — backtested WR ~70%, 1:2 RR)
 # ═══════════════════════════════════════════════════════════════════
 def get_signal():
-    if not HAS_YF:
-        return {"error": "yfinance not available"}
-    try:
-        df = yf.download("GC=F", period="60d", interval="1h",
-                         progress=False, auto_adjust=True)
-        if df.empty or len(df) < 220:
-            return {"error": "Not enough data from yfinance"}
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0].lower() for c in df.columns]
-        else:
-            df.columns = [c.lower() for c in df.columns]
-        df = df.dropna()
-    except Exception as e:
-        return {"error": str(e)}
+    # ── 1. Fetch data ─────────────────────────────────────────────
+    df, err = fetch_xauusd()
+    if err or df is None:
+        log.warning(f"Data fetch failed: {err}")
+        return {"error": err or "No data"}
 
+    # ── 2. Indicators ──────────────────────────────────────────────
     c  = df['close']
     et = ema(c, 200)
     up, mid, lo = bollinger(c, 20, 2.0)
@@ -103,46 +174,57 @@ def get_signal():
     sqz_now  = bool(sqz.iloc[i])
     sqz_prev = bool(sqz.iloc[i - 1])
 
-    trend_up  = price > e200;   trend_dn  = price < e200
-    brk_long  = price > upper  and sqz_prev
-    brk_short = price < lower  and sqz_prev
-    rsi_lok   = 50 < rsiv < 75;  rsi_sok  = 25 < rsiv < 50
+    # ── 3. Entry conditions ────────────────────────────────────────
+    trend_up  = price > e200
+    trend_dn  = price < e200
+    brk_long  = price > upper and sqz_prev
+    brk_short = price < lower and sqz_prev
+    rsi_lok   = 50 < rsiv < 75
+    rsi_sok   = 25 < rsiv < 50
 
     signal = "WAIT"
     if trend_up  and brk_long  and rsi_lok:  signal = "LONG"
     if trend_dn  and brk_short and rsi_sok:  signal = "SHORT"
 
+    # ── 4. Trade levels ────────────────────────────────────────────
     sd  = atrv * 1.5;  td = sd * 2.0
     stop   = round(price - sd if signal == "LONG"  else price + sd, 2)
     target = round(price + td if signal == "LONG"  else price - td, 2)
 
+    # ── 5. Squeeze pressure (0–100%) ─────────────────────────────
     recent  = sorted([v for v in bbw.iloc[max(0, i-50):i+1] if not np.isnan(v)])
     rank    = next((j for j, v in enumerate(recent) if v >= bbwv), len(recent))
     sqz_pct = round((1 - rank / max(1, len(recent) - 1)) * 100, 1)
 
+    # ── 6. 24h change ─────────────────────────────────────────────
     prev_close = float(c.iloc[i - 24]) if i >= 24 else price
     change     = round(price - prev_close, 2)
     change_pct = round((price / prev_close - 1) * 100, 2)
 
+    # ── 7. Chart history (last 72 bars) ───────────────────────────
     price_hist = [round(float(v), 2) for v in c.iloc[-72:]  if not np.isnan(v)]
     ema_hist   = [round(float(v), 2) for v in et.iloc[-72:] if not np.isnan(v)]
 
     conds_met = sum([
-        trend_up or trend_dn, sqz_prev,
-        brk_long or brk_short, rsi_lok or rsi_sok,
+        trend_up or trend_dn,
+        sqz_prev,
+        brk_long or brk_short,
+        rsi_lok  or rsi_sok,
     ])
 
     return {
-        "signal":      signal,
-        "timestamp":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "bar_time":    str(df.index[-1]),
-        "price":       round(price, 2),
-        "change":      change,
-        "change_pct":  change_pct,
-        "stop":        stop,
-        "target":      target,
-        "stop_dist":   round(sd, 2),
-        "target_dist": round(td, 2),
+        "signal":       signal,
+        "timestamp":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "bar_time":     str(df.index[-1]),
+        "price":        round(price, 2),
+        "change":       change,
+        "change_pct":   change_pct,
+        "stop":         stop,
+        "target":       target,
+        "stop_dist":    round(sd, 2),
+        "target_dist":  round(td, 2),
+        "data_source":  "Twelve Data (XAU/USD spot)",
+        "data_bars":    len(df),
         "indicators": {
             "ema200":       round(e200,  2),
             "rsi7":         round(rsiv,  1),
@@ -160,8 +242,7 @@ def get_signal():
             "rsi_lok":   rsi_lok,   "rsi_sok":   rsi_sok,
         },
         "conditions_met": conds_met,
-        "chart":       {"price": price_hist, "ema200": ema_hist},
-        "data_bars":   len(df),
+        "chart":        {"price": price_hist, "ema200": ema_hist},
     }
 
 
@@ -192,17 +273,17 @@ async def tg_send(text: str) -> bool:
 
 
 def msg_signal(d: dict) -> str:
-    sig    = d["signal"]
-    price  = d["price"];   stop  = d["stop"];    target = d["target"]
-    sd     = d["stop_dist"];  td = d["target_dist"]
-    rsi7   = d["indicators"]["rsi7"]
-    e200   = d["indicators"]["ema200"]
-    sqz    = d["indicators"]["squeeze_pct"]
-    ts     = d["timestamp"]
-    chg    = d["change"];  chgp = d["change_pct"]
-    arrow  = "▲" if chg >= 0 else "▼"
-    head   = "🟢 <b>LONG SIGNAL  —  XAU/USD GOLD</b>" if sig == "LONG" \
-             else "🔴 <b>SHORT SIGNAL  —  XAU/USD GOLD</b>"
+    sig   = d["signal"]
+    price = d["price"];  stop = d["stop"];   target = d["target"]
+    sd    = d["stop_dist"];  td = d["target_dist"]
+    rsi7  = d["indicators"]["rsi7"]
+    e200  = d["indicators"]["ema200"]
+    sqz   = d["indicators"]["squeeze_pct"]
+    ts    = d["timestamp"]
+    chg   = d["change"];  chgp = d["change_pct"]
+    arrow = "▲" if chg >= 0 else "▼"
+    head  = "🟢 <b>LONG SIGNAL  —  XAU/USD GOLD</b>" if sig == "LONG" \
+            else "🔴 <b>SHORT SIGNAL  —  XAU/USD GOLD</b>"
     action = "📈  BUY GOLD at market" if sig == "LONG" else "📉  SELL GOLD at market"
     pos    = round(100 / sd, 4) if sd > 0 else "—"
 
@@ -225,6 +306,7 @@ def msg_signal(d: dict) -> str:
 💼 <b>Size</b>  (1% of $10k = $100 risk)
   →  <code>{pos} oz gold</code>
 
+📡 <i>Data: Twelve Data XAU/USD spot</i>
 ⚠️ <i>Set stop and target immediately after entry</i>
 🕐 <i>{ts}</i>"""
 
@@ -240,14 +322,14 @@ def msg_cleared(prev: str, price: float, ts: str) -> str:
 
 
 def msg_approaching(d: dict) -> str:
-    cond  = d["conditions"];  ind  = d["indicators"]
-    price = d["price"];       ts   = d["timestamp"]
+    cond  = d["conditions"];  ind = d["indicators"]
+    price = d["price"];       ts  = d["timestamp"]
     sqz   = ind["squeeze_pct"]
     rows  = [
-        ("✅" if cond["trend_up"]  or cond["trend_dn"]   else "❌") + " Trend filter (EMA 200)",
-        ("✅" if ind["squeeze_prev"]                      else "❌") + " BB Squeeze active",
-        ("✅" if cond["brk_long"]  or cond["brk_short"]  else "❌") + " BB Breakout",
-        ("✅" if cond["rsi_lok"]   or cond["rsi_sok"]    else "❌") + " RSI in momentum zone",
+        ("✅" if cond["trend_up"]  or cond["trend_dn"]  else "❌") + " Trend filter (EMA 200)",
+        ("✅" if ind["squeeze_prev"]                     else "❌") + " BB Squeeze active",
+        ("✅" if cond["brk_long"]  or cond["brk_short"] else "❌") + " BB Breakout",
+        ("✅" if cond["rsi_lok"]   or cond["rsi_sok"]   else "❌") + " RSI in momentum zone",
     ]
     return (
         f"⚡ <b>Signal Forming  —  XAU/USD</b>\n\n"
@@ -263,11 +345,12 @@ def msg_approaching(d: dict) -> str:
 def msg_startup() -> str:
     return (
         "✅ <b>XAU/USD Signal Bot Online</b>\n\n"
-        f"Scanning every <b>{CHECK_SECS // 60} minutes</b>.\n\n"
+        f"Scanning every <b>{CHECK_SECS // 60} minutes</b>.\n"
+        f"📡 Data source: <b>Twelve Data (XAU/USD spot)</b>\n\n"
         "You'll receive alerts for:\n"
         "  🟢  LONG signal\n"
         "  🔴  SHORT signal\n"
-        "  ⚡  3/4 conditions met (approaching)\n"
+        "  ⚡  3/4 conditions met\n"
         "  ⚪  Signal cleared\n\n"
         "Strategy: BB Squeeze Breakout\n"
         "Risk/Reward: <b>1:2</b>  ·  Backtested WR: <b>~70%</b>"
@@ -304,15 +387,18 @@ async def checker_loop():
                 if is_new:
                     log.info(f"🚨 NEW {sig} @ ${data['price']}")
                     await tg_send(msg_signal(data))
-                    prev_signal = sig;  prev_bar_time = bar_time
-                    warned_3of4 = False
+                    prev_signal   = sig
+                    prev_bar_time = bar_time
+                    warned_3of4   = False
                 else:
                     log.info(f"Already notified {sig} for bar {bar_time}")
 
             elif sig == "WAIT" and prev_signal in ("LONG", "SHORT"):
                 log.info("Signal cleared")
                 await tg_send(msg_cleared(prev_signal, data["price"], data["timestamp"]))
-                prev_signal = None;  prev_bar_time = None;  warned_3of4 = False
+                prev_signal   = None
+                prev_bar_time = None
+                warned_3of4   = False
 
             elif sig == "WAIT" and conds == 3 and not warned_3of4:
                 log.info("3/4 conditions — sending approach warning")
@@ -351,10 +437,12 @@ def api_signal():
 @app.get("/health")
 def health():
     return {
-        "status":   "ok",
-        "time":     datetime.now(timezone.utc).isoformat(),
-        "telegram": "configured ✅" if TG_TOKEN else "NOT configured ❌",
-        "interval": f"every {CHECK_SECS}s",
+        "status":       "ok",
+        "time":         datetime.now(timezone.utc).isoformat(),
+        "data_source":  "Twelve Data (XAU/USD spot)",
+        "td_key_set":   bool(TD_KEY),
+        "telegram":     "configured ✅" if TG_TOKEN else "NOT configured ❌",
+        "interval":     f"every {CHECK_SECS}s",
     }
 
 @app.get("/api/test-notification")
@@ -367,19 +455,20 @@ async def test_notification():
         )
     ok = await tg_send(
         "🧪 <b>Test Notification — XAU/USD Bot</b>\n\n"
-        "✅ Your Telegram bot is working!\n\n"
-        "You will receive push notifications for:\n"
-        "  🟢  LONG signal\n"
-        "  🔴  SHORT signal\n"
+        "✅ Telegram is correctly configured!\n"
+        "📡 Data source: Twelve Data (XAU/USD spot)\n\n"
+        "You will receive push notifications when:\n"
+        "  🟢  LONG signal fires\n"
+        "  🔴  SHORT signal fires\n"
         "  ⚡  3/4 conditions met\n"
         "  ⚪  Signal cleared\n\n"
-        "<i>This was only a test message.</i>"
+        "<i>This was a test message only.</i>"
     )
     return {"sent": ok, "message": "Check your Telegram now!"}
 
 @app.get("/api/check-now")
 async def check_now():
-    """Manually trigger a check + send Telegram if signal active."""
+    """Manually trigger a signal check + Telegram if active."""
     data = get_signal()
     if "error" in data:
         return JSONResponse({"error": data["error"]}, status_code=500)
@@ -390,7 +479,7 @@ async def check_now():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  MOBILE DASHBOARD HTML
+#  MOBILE DASHBOARD
 # ═══════════════════════════════════════════════════════════════════
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -415,11 +504,18 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;
 .sub{font-size:9px;color:var(--muted);letter-spacing:2px;margin-top:3px}
 .rh{text-align:right;font-size:11px;color:var(--muted)}
 .rbtn{margin-top:6px;background:var(--panel);border:1px solid var(--dim);color:var(--muted);
-      font-family:'DM Mono';font-size:10px;padding:5px 12px;border-radius:5px;cursor:pointer;letter-spacing:1px}
+      font-family:'DM Mono';font-size:10px;padding:5px 12px;border-radius:5px;
+      cursor:pointer;letter-spacing:1px;-webkit-appearance:none}
 .rbtn:active{opacity:.7}
-.tgbar{background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-radius:8px;
-       padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px;font-size:11px}
-.tgbar-icon{font-size:18px}
+.src-bar{background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.2);
+          border-radius:8px;padding:9px 14px;margin-bottom:14px;
+          display:flex;align-items:center;gap:10px;font-size:11px}
+.src-icon{font-size:16px}
+.src-txt{color:#7dd3fc}
+.src-sub{font-size:10px;color:var(--muted);margin-top:2px}
+.tgbar{background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);
+       border-radius:8px;padding:9px 14px;margin-bottom:14px;
+       display:flex;align-items:center;gap:10px;font-size:11px}
 .tgbar-txt{color:#86efac}
 .tgbar-sub{font-size:10px;color:var(--muted);margin-top:2px}
 .pbar{background:linear-gradient(135deg,#0f172a,var(--panel));border:1px solid var(--dim);
@@ -444,7 +540,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;
 .lh{font-size:9px;color:var(--muted);margin-top:2px}
 .cw{background:var(--panel);border:1px solid var(--border);border-radius:10px;
     padding:12px 14px;margin-bottom:14px;overflow:hidden}
-.ch{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);letter-spacing:2px;margin-bottom:8px}
+.ch{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);
+    letter-spacing:2px;margin-bottom:8px}
 canvas{display:block;width:100%;border-radius:4px}
 .stl{font-size:9px;color:var(--muted);letter-spacing:2.5px;margin-bottom:10px}
 .cr{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border-radius:6px;
@@ -460,8 +557,10 @@ canvas{display:block;width:100%;border-radius:4px}
 .stlb{font-size:9px;color:var(--muted);letter-spacing:1.5px;margin-bottom:4px}
 .sv{font-family:'Bebas Neue';font-size:18px;letter-spacing:1px}
 .shi{font-size:9px;color:var(--muted);margin-top:2px}
-.pb{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px}
-.pr{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid var(--border)}
+.pb{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:14px 16px;margin-bottom:14px}
+.pr{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;
+    border-bottom:1px solid var(--border)}
 .pr:last-child{border-bottom:none}
 .prL{color:var(--muted)}
 .nbtn{width:100%;padding:12px;background:rgba(59,130,246,.1);
@@ -497,8 +596,16 @@ footer{font-size:9px;color:var(--border);text-align:center;letter-spacing:1px;
   </div>
 </div>
 
+<div class="src-bar">
+  <div class="src-icon">📡</div>
+  <div>
+    <div class="src-txt">Twelve Data — XAU/USD spot price</div>
+    <div class="src-sub">True forex gold rate · not futures · updates every 1h</div>
+  </div>
+</div>
+
 <div class="tgbar">
-  <div class="tgbar-icon">📲</div>
+  <div style="font-size:18px">📲</div>
   <div>
     <div class="tgbar-txt">Telegram notifications active</div>
     <div class="tgbar-sub">Push alert fires automatically when any signal triggers</div>
@@ -559,14 +666,15 @@ function render(d) {
     </div>
     <div style="text-align:right">
       <div class="lb">⬤ LIVE</div>
-      <div class="da" style="margin-top:6px">${d.data_bars} bars · yfinance</div>
+      <div class="da" style="margin-top:6px">Twelve Data · XAU/USD spot</div>
       <div class="da">${(d.bar_time||'').slice(0,16)}</div>
     </div>
   </div>
   <div class="sb ${sig}">
     <div class="sn" style="color:${sc}">${sig==='LONG'?'▲ LONG':sig==='SHORT'?'▼ SHORT':'◆ NO SIGNAL'}</div>
     <div class="ss">${sig!=='WAIT'?`ENTRY · STOP ${fmt(d.stop)} · TARGET ${fmt(d.target)} · 1:2 RR`:`${d.conditions_met}/4 conditions · ${ind.squeeze_pct>70?'⚡ squeeze building':'watching for setup'}`}</div>
-    ${sig!=='WAIT'?`<div class="lg">
+    ${sig!=='WAIT'?`
+    <div class="lg">
       <div class="lt"><div class="ll">ENTRY</div><div class="lv" style="color:#f1f5f9">${fmt(d.price)}</div><div class="lh">at market</div></div>
       <div class="lt"><div class="ll">STOP</div><div class="lv" style="color:#ef4444">${fmt(d.stop)}</div><div class="lh">−${fmt(d.stop_dist)}</div></div>
       <div class="lt"><div class="ll">TARGET</div><div class="lv" style="color:#22c55e">${fmt(d.target)}</div><div class="lh">+${fmt(d.target_dist)}</div></div>
@@ -574,7 +682,7 @@ function render(d) {
     </div>`:''}
   </div>
   <div class="cw">
-    <div class="ch"><span>PRICE HISTORY (72H)</span><span><span style="color:#38bdf8">╌ EMA200 </span><span style="color:${sc}">── PRICE</span></span></div>
+    <div class="ch"><span>PRICE HISTORY (72H)  —  XAU/USD SPOT</span><span><span style="color:#38bdf8">╌ EMA200 </span><span style="color:${sc}">── PRICE</span></span></div>
     <canvas id="chart" style="height:80px;"></canvas>
   </div>
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px">
@@ -591,7 +699,7 @@ function render(d) {
        ['ATR (14)',fmt(ind.atr14),'#94a3b8','volatility'],
        ['BB WIDTH',ind.bb_width.toFixed(3)+'%',ind.squeeze_now?'#a855f7':'#64748b',ind.squeeze_now?'⚡ squeezed':'normal'],
        ['SQUEEZE',ind.squeeze_pct+'%',ind.squeeze_pct>70?'#a855f7':'#64748b',ind.squeeze_pct>70?'building!':'low'],
-       ['BARS',d.data_bars,'#334155','60 days']
+       ['BARS',d.data_bars,'#334155','loaded']
       ].map(([l,v,c,h])=>`<div class="st"><div class="stlb">${l}</div><div class="sv" style="color:${c}">${v}</div><div class="shi">${h}</div></div>`).join('')}
   </div>
   ${sig!=='WAIT'?`<div class="pb">
