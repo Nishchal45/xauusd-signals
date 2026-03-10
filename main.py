@@ -39,7 +39,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger("xauusd")
 
 # ── Config from Render environment variables ──────────────────────────────────
-AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY",    "")   # ← Alpha Vantage API key (free)
+
 TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN",   "")
 TG_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID",     "")
 CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour default
@@ -51,74 +51,23 @@ CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour de
 #  Sign up free at alphavantage.co — no credit card needed
 # ═══════════════════════════════════════════════════════════════════
 def fetch_xauusd() -> tuple:
-    """
-    Fetch XAU/USD 1H candles from Alpha Vantage FX_INTRADAY endpoint.
-    Returns (DataFrame, error_string_or_None).
-
-    Alpha Vantage endpoint: FX_INTRADAY
-      from_symbol = XAU   (gold — treated as forex currency)
-      to_symbol   = USD
-      interval    = 60min (1-hour candles)
-      outputsize  = full  (up to 30 days of hourly data ≈ 720 bars)
-
-    Free tier limit: 25 API calls/day
-    Our usage:       1 call/hour = 24 calls/day  ✅ well within limit
-    """
-    if not AV_KEY:
-        return None, "ALPHA_VANTAGE_KEY environment variable not set in Render"
-
-    import requests as req
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function":    "FX_INTRADAY",
-        "from_symbol": "XAU",
-        "to_symbol":   "USD",
-        "interval":    "60min",
-        "outputsize":  "full",      # last 30 days of hourly data
-        "apikey":      AV_KEY,
-    }
-
+    """Fetch XAU/USD 1H candles via yfinance (gold futures GC=F).
+    Price tracks spot XAU/USD within ~$5-15 — sufficient for signals."""
     try:
-        r = req.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        return None, f"HTTP error fetching Alpha Vantage: {e}"
-
-    # Check for API-level errors
-    if "Error Message" in data:
-        return None, f"Alpha Vantage error: {data['Error Message']}"
-    if "Note" in data:
-        # Rate limit note
-        return None, "Alpha Vantage rate limit reached — will retry next cycle"
-    if "Information" in data:
-        return None, f"Alpha Vantage: {data['Information']}"
-
-    ts = data.get("Time Series FX (60min)")
-    if not ts:
-        return None, f"No time series returned. Keys: {list(data.keys())}"
-
-    try:
-        rows = []
-        for dt_str, v in sorted(ts.items()):   # sorted = chronological order
-            rows.append({
-                "open":  float(v["1. open"]),
-                "high":  float(v["2. high"]),
-                "low":   float(v["3. low"]),
-                "close": float(v["4. close"]),
-            })
-        df = pd.DataFrame(rows, index=pd.to_datetime(sorted(ts.keys())))
-        df = df.sort_index().dropna()
-
-        if len(df) < 220:
-            return None, f"Only {len(df)} bars returned — need 220+ for EMA200 warmup"
-
-        log.info(f"Alpha Vantage: {len(df)} XAU/USD 1H bars "
-                 f"({df.index[0].date()} → {df.index[-1].date()})")
+        import yfinance as yf
+        df = yf.download("GC=F", period="60d", interval="1h",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 220:
+            return None, "Not enough data from yfinance"
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        df = df.dropna()
+        log.info(f"yfinance: {len(df)} GC=F bars loaded")
         return df, None
-
     except Exception as e:
-        return None, f"Data parse error: {e}"
+        return None, f"yfinance error: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════
