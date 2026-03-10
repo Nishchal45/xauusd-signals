@@ -39,7 +39,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger("xauusd")
 
 # ── Config from Render environment variables ──────────────────────────────────
-
+AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY",    "")   # ← Alpha Vantage API key (free)
 TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN",   "")
 TG_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID",     "")
 CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour default
@@ -51,23 +51,74 @@ CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour de
 #  Sign up free at alphavantage.co — no credit card needed
 # ═══════════════════════════════════════════════════════════════════
 def fetch_xauusd() -> tuple:
-    """Fetch XAU/USD 1H candles via yfinance (gold futures GC=F).
-    Price tracks spot XAU/USD within ~$5-15 — sufficient for signals."""
+    """
+    Fetch XAU/USD 1H candles from Alpha Vantage FX_INTRADAY endpoint.
+    Returns (DataFrame, error_string_or_None).
+
+    Alpha Vantage endpoint: FX_INTRADAY
+      from_symbol = XAU   (gold — treated as forex currency)
+      to_symbol   = USD
+      interval    = 60min (1-hour candles)
+      outputsize  = full  (up to 30 days of hourly data ≈ 720 bars)
+
+    Free tier limit: 25 API calls/day
+    Our usage:       1 call/hour = 24 calls/day  ✅ well within limit
+    """
+    if not AV_KEY:
+        return None, "ALPHA_VANTAGE_KEY environment variable not set in Render"
+
+    import requests as req
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function":    "FX_INTRADAY",
+        "from_symbol": "XAU",
+        "to_symbol":   "USD",
+        "interval":    "60min",
+        "outputsize":  "full",      # last 30 days of hourly data
+        "apikey":      AV_KEY,
+    }
+
     try:
-        import yfinance as yf
-        df = yf.download("GC=F", period="60d", interval="1h",
-                         progress=False, auto_adjust=True)
-        if df.empty or len(df) < 220:
-            return None, "Not enough data from yfinance"
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0].lower() for c in df.columns]
-        else:
-            df.columns = [c.lower() for c in df.columns]
-        df = df.dropna()
-        log.info(f"yfinance: {len(df)} GC=F bars loaded")
-        return df, None
+        r = req.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
     except Exception as e:
-        return None, f"yfinance error: {e}"
+        return None, f"HTTP error fetching Alpha Vantage: {e}"
+
+    # Check for API-level errors
+    if "Error Message" in data:
+        return None, f"Alpha Vantage error: {data['Error Message']}"
+    if "Note" in data:
+        # Rate limit note
+        return None, "Alpha Vantage rate limit reached — will retry next cycle"
+    if "Information" in data:
+        return None, f"Alpha Vantage: {data['Information']}"
+
+    ts = data.get("Time Series FX (60min)")
+    if not ts:
+        return None, f"No time series returned. Keys: {list(data.keys())}"
+
+    try:
+        rows = []
+        for dt_str, v in sorted(ts.items()):   # sorted = chronological order
+            rows.append({
+                "open":  float(v["1. open"]),
+                "high":  float(v["2. high"]),
+                "low":   float(v["3. low"]),
+                "close": float(v["4. close"]),
+            })
+        df = pd.DataFrame(rows, index=pd.to_datetime(sorted(ts.keys())))
+        df = df.sort_index().dropna()
+
+        if len(df) < 220:
+            return None, f"Only {len(df)} bars returned — need 220+ for EMA200 warmup"
+
+        log.info(f"Alpha Vantage: {len(df)} XAU/USD 1H bars "
+                 f"({df.index[0].date()} → {df.index[-1].date()})")
+        return df, None
+
+    except Exception as e:
+        return None, f"Data parse error: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -253,71 +304,90 @@ async def tg_send(text: str) -> bool:
 
 
 def msg_signal(d: dict) -> str:
-    sig   = d["signal"]
-    price = d["price"];  stop = d["stop"];   target = d["target"]
-    sd    = d["stop_dist"];  td = d["target_dist"]
-    rsi7  = d["indicators"]["rsi7"]
-    e200  = d["indicators"]["ema200"]
-    sqz   = d["indicators"]["squeeze_pct"]
-    ts    = d["timestamp"]
-    chg   = d["change"];  chgp = d["change_pct"]
-    arrow = "▲" if chg >= 0 else "▼"
-    head  = "🟢 <b>LONG SIGNAL  —  XAU/USD GOLD</b>" if sig == "LONG" \
-            else "🔴 <b>SHORT SIGNAL  —  XAU/USD GOLD</b>"
-    action = "📈  BUY GOLD at market" if sig == "LONG" else "📉  SELL GOLD at market"
+    sig    = d["signal"]
+    price  = d["price"];   stop = d["stop"];   target = d["target"]
+    sd     = d["stop_dist"];   td = d["target_dist"]
+    rsi7   = d["indicators"]["rsi7"]
+    e200   = d["indicators"]["ema200"]
+    atr14  = d["indicators"]["atr14"]
+    sqz    = d["indicators"]["squeeze_pct"]
+    ts     = d["timestamp"]
+    chg    = d["change"];   chgp = d["change_pct"]
+    arrow  = "▲" if chg >= 0 else "▼"
     pos    = round(100 / sd, 4) if sd > 0 else "—"
+
+    if sig == "LONG":
+        head   = "🟢 <b>LONG SIGNAL — XAU/USD GOLD</b>"
+        action = "📈 BUY at market price"
+        plan1  = "Price drops below SL → exit immediately"
+        plan2  = "Price reaches TP → take profit"
+    else:
+        head   = "🔴 <b>SHORT SIGNAL — XAU/USD GOLD</b>"
+        action = "📉 SELL at market price"
+        plan1  = "Price rises above SL → exit immediately"
+        plan2  = "Price falls to TP → take profit"
 
     return f"""{head}
 
 {action}
 
-━━━━━━━━━━━━━━━━━━━━━
-💰 <b>Entry</b>        <code>${price:,.2f}</code>
-🛑 <b>Stop Loss</b>   <code>${stop:,.2f}</code>  <i>(−${sd:.2f})</i>
-🎯 <b>Take Profit</b> <code>${target:,.2f}</code>  <i>(+${td:.2f})</i>
-⚖️ <b>Risk/Reward</b> <code>1 : 2</code>
-━━━━━━━━━━━━━━━━━━━━━
-📊 <b>Confluence</b>
-  RSI(7)    <code>{rsi7:.1f}</code>
-  EMA 200   <code>${e200:,.2f}</code>
-  Squeeze   <code>{sqz:.0f}% pressure</code>
-  24h move  <code>{arrow} ${abs(chg):.2f}  ({chgp:+.2f}%)</code>
-━━━━━━━━━━━━━━━━━━━━━
-💼 <b>Size</b>  (1% of $10k = $100 risk)
-  →  <code>{pos} oz gold</code>
+━━━━━━━━━━━━━━━━━━━━━━
+💰 <b>ENTRY</b>       <code>${{price:>10,.2f}}</code>
+🛑 <b>STOP LOSS</b>  <code>${{stop:>10,.2f}}</code>  <i>(−${{sd:.2f}})</i>
+🎯 <b>TAKE PROFIT</b> <code>${{target:>10,.2f}}</code>  <i>(+${{td:.2f}})</i>
+⚖️ <b>RISK/REWARD</b> <code>1 : 2</code>
+━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>Indicators</b>
+  RSI(7):   <code>{{rsi7:.1f}}</code>   EMA200: <code>${{e200:,.2f}}</code>
+  ATR(14):  <code>${{atr14:.2f}}</code>   Squeeze: <code>{{sqz:.0f}}%</code>
+  24h move: <code>{{arrow}} ${{abs(chg):.2f}} ({{chgp:+.2f}}%)</code>
+━━━━━━━━━━━━━━━━━━━━━━
+💼 <b>Position size</b>  (1% risk / $10k account)
+  Risk $100 → <code>{{pos}} oz gold</code>
 
-📡 <i>Data: Twelve Data XAU/USD spot</i>
-⚠️ <i>Set stop and target immediately after entry</i>
-🕐 <i>{ts}</i>"""
+📋 <b>Trade plan</b>
+  • {{plan1}}
+  • {{plan2}}
+  • Opposite signal fires → exit early
+
+🕐 <i>{{ts}}</i>"""
 
 
 def msg_cleared(prev: str, price: float, ts: str) -> str:
     return (
-        f"⚪ <b>Signal Cleared  —  XAU/USD</b>\n\n"
-        f"Previous <b>{prev}</b> signal is no longer active.\n"
+        f"⚪ <b>Signal Cleared — XAU/USD</b>\n\n"
+        f"The <b>{prev}</b> signal is no longer active.\n\n"
         f"💰 Current price: <code>${price:,.2f}</code>\n\n"
-        f"Watching for next setup…\n"
+        f"<b>Action:</b> If still in trade, manage it manually.\n"
+        f"Watching for next setup...\n\n"
         f"🕐 <i>{ts}</i>"
     )
 
 
 def msg_approaching(d: dict) -> str:
-    cond  = d["conditions"];  ind = d["indicators"]
-    price = d["price"];       ts  = d["timestamp"]
+    cond  = d["conditions"];   ind = d["indicators"]
+    price = d["price"];        ts  = d["timestamp"]
+    stop  = d["stop"];         target = d["target"]
+    sd    = d["stop_dist"];    td = d["target_dist"]
     sqz   = ind["squeeze_pct"]
-    rows  = [
-        ("✅" if cond["trend_up"]  or cond["trend_dn"]  else "❌") + " Trend filter (EMA 200)",
-        ("✅" if ind["squeeze_prev"]                     else "❌") + " BB Squeeze active",
-        ("✅" if cond["brk_long"]  or cond["brk_short"] else "❌") + " BB Breakout",
-        ("✅" if cond["rsi_lok"]   or cond["rsi_sok"]   else "❌") + " RSI in momentum zone",
+    direction = "LONG 📈" if cond["trend_up"] else "SHORT 📉" if cond["trend_dn"] else "—"
+    rows = [
+        ("✅" if cond["trend_up"]    or cond["trend_dn"]  else "❌") + " Trend (EMA 200)",
+        ("✅" if ind["squeeze_prev"]                       else "❌") + " BB Squeeze",
+        ("✅" if cond["brk_long"]    or cond["brk_short"] else "❌") + " BB Breakout",
+        ("✅" if cond["rsi_lok"]     or cond["rsi_sok"]   else "❌") + " RSI zone (50–80)",
+        ("✅" if cond["atr_expanding"]                    else "❌") + " ATR expanding",
     ]
     return (
-        f"⚡ <b>Signal Forming  —  XAU/USD</b>\n\n"
-        f"3 of 4 conditions met — <b>stay alert!</b>\n\n"
+        f"⚡ <b>Signal Forming — XAU/USD</b>\n\n"
+        f"<b>4 of 5 conditions met</b> — stay alert!\n"
+        f"Likely direction: <b>{direction}</b>\n\n"
         + "\n".join(rows) +
-        f"\n\n💰 Price: <code>${price:,.2f}</code>\n"
-        f"🗜 Squeeze pressure: <code>{sqz:.0f}%</code>\n\n"
-        f"<i>Next candle could trigger the full signal.</i>\n"
+        f"\n\n💰 Current price:    <code>${price:,.2f}</code>\n"
+        f"🛑 Indicative SL:   <code>${stop:,.2f}</code>  (−${sd:.2f})\n"
+        f"🎯 Indicative TP:   <code>${target:,.2f}</code>  (+${td:.2f})\n"
+        f"🗜 Squeeze:         <code>{sqz:.0f}% pressure</code>\n\n"
+        f"<i>⚠️ Not confirmed yet. Wait for full signal alert.</i>\n"
         f"🕐 <i>{ts}</i>"
     )
 
@@ -325,15 +395,14 @@ def msg_approaching(d: dict) -> str:
 def msg_startup() -> str:
     return (
         "✅ <b>XAU/USD Signal Bot Online</b>\n\n"
-        f"Scanning every <b>{CHECK_SECS // 60} minutes</b>.\n"
-        f"📡 Data source: <b>Alpha Vantage (XAU/USD spot)</b>\n\n"
-        "You'll receive alerts for:\n"
-        "  🟢  LONG signal\n"
-        "  🔴  SHORT signal\n"
-        "  ⚡  3/4 conditions met\n"
+        f"Scanning every <b>{CHECK_SECS // 60} minutes</b> automatically.\n\n"
+        "<b>You will receive:</b>\n"
+        "  🟢  LONG  — with Entry / Stop Loss / Take Profit\n"
+        "  🔴  SHORT — with Entry / Stop Loss / Take Profit\n"
+        "  ⚡  Signal forming (4/5 conditions met)\n"
         "  ⚪  Signal cleared\n\n"
-        "Strategy: BB Squeeze Breakout <b>v2</b>\n"
-        "Risk/Reward: <b>1:2</b>  ·  Target: <b>5–6 trades/month</b>  ·  WR: <b>~62%</b>"
+        "<b>Strategy:</b> BB Squeeze Breakout v2\n"
+        "<b>Risk/Reward:</b> 1:2  ·  <b>WR:</b> ~62%  ·  <b>~5–6 trades/month</b>"
     )
 
 
@@ -411,7 +480,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 #  API ROUTES
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/signal")
-@app.head("/health")
 def api_signal():
     return JSONResponse(get_signal())
 
