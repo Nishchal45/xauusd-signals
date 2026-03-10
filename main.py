@@ -462,6 +462,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 #  API ROUTES
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/signal")
+@app.head("/health")
 def api_signal():
     return JSONResponse(get_signal())
 
