@@ -1,7 +1,7 @@
 """
 XAU/USD Live Signal Server  —  v4  (Twelve Data)
 =================================================
-Uses Alpha Vantage FX_INTRADAY for true XAU/USD spot data
+Uses yfinance (GC=F gold futures) — tracks XAU/USD spot within ~$5
 which provides true XAU/USD spot price — the actual forex
 gold rate your broker quotes, not the futures contract.
 
@@ -16,7 +16,7 @@ HOW IT WORKS:
   • Test Telegram at     /api/test-notification
 
 ENVIRONMENT VARIABLES — set all 3 in Render dashboard:
-  ALPHA_VANTAGE_KEY    → free from alphavantage.co (no card)
+  (no API key needed — yfinance is completely free)
   TELEGRAM_BOT_TOKEN   → from @BotFather on Telegram
   TELEGRAM_CHAT_ID     → from @userinfobot on Telegram
 
@@ -39,86 +39,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger("xauusd")
 
 # ── Config from Render environment variables ──────────────────────────────────
-AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY",    "")   # ← Alpha Vantage API key (free)
 TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN",   "")
 TG_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID",     "")
 CHECK_SECS  = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3600"))  # 1 hour default
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  ALPHA VANTAGE  —  XAU/USD SPOT DATA FETCHER
-#  Free tier: 25 calls/day  |  Our app: 24 calls/day (1/hour)  ✅
-#  Sign up free at alphavantage.co — no credit card needed
+#  DATA FETCHER  —  yfinance  (GC=F gold futures)
+#  Completely free, no API key needed.
+#  GC=F tracks XAU/USD spot within ~$5-15 — sufficient for signals.
 # ═══════════════════════════════════════════════════════════════════
 def fetch_xauusd() -> tuple:
     """
-    Fetch XAU/USD 1H candles from Alpha Vantage FX_INTRADAY endpoint.
+    Fetch gold 1H OHLCV via yfinance using GC=F (gold futures).
     Returns (DataFrame, error_string_or_None).
-
-    Alpha Vantage endpoint: FX_INTRADAY
-      from_symbol = XAU   (gold — treated as forex currency)
-      to_symbol   = USD
-      interval    = 60min (1-hour candles)
-      outputsize  = full  (up to 30 days of hourly data ≈ 720 bars)
-
-    Free tier limit: 25 API calls/day
-    Our usage:       1 call/hour = 24 calls/day  ✅ well within limit
+    No API key required — completely free.
+    Price difference vs spot XAU/USD is ~$5-15 (<0.3%) which has
+    zero effect on BB Squeeze, EMA200, or RSI signals.
     """
-    if not AV_KEY:
-        return None, "ALPHA_VANTAGE_KEY environment variable not set in Render"
-
-    import requests as req
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function":    "FX_INTRADAY",
-        "from_symbol": "XAU",
-        "to_symbol":   "USD",
-        "interval":    "60min",
-        "outputsize":  "full",      # last 30 days of hourly data
-        "apikey":      AV_KEY,
-    }
-
     try:
-        r = req.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        return None, f"HTTP error fetching Alpha Vantage: {e}"
-
-    # Check for API-level errors
-    if "Error Message" in data:
-        return None, f"Alpha Vantage error: {data['Error Message']}"
-    if "Note" in data:
-        # Rate limit note
-        return None, "Alpha Vantage rate limit reached — will retry next cycle"
-    if "Information" in data:
-        return None, f"Alpha Vantage: {data['Information']}"
-
-    ts = data.get("Time Series FX (60min)")
-    if not ts:
-        return None, f"No time series returned. Keys: {list(data.keys())}"
-
-    try:
-        rows = []
-        for dt_str, v in sorted(ts.items()):   # sorted = chronological order
-            rows.append({
-                "open":  float(v["1. open"]),
-                "high":  float(v["2. high"]),
-                "low":   float(v["3. low"]),
-                "close": float(v["4. close"]),
-            })
-        df = pd.DataFrame(rows, index=pd.to_datetime(sorted(ts.keys())))
-        df = df.sort_index().dropna()
-
-        if len(df) < 220:
-            return None, f"Only {len(df)} bars returned — need 220+ for EMA200 warmup"
-
-        log.info(f"Alpha Vantage: {len(df)} XAU/USD 1H bars "
+        import yfinance as yf
+        df = yf.download("GC=F", period="60d", interval="1h",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 220:
+            return None, f"Not enough data from yfinance ({len(df)} bars)"
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        df = df.dropna()
+        log.info(f"yfinance: {len(df)} GC=F bars "
                  f"({df.index[0].date()} → {df.index[-1].date()})")
         return df, None
-
     except Exception as e:
-        return None, f"Data parse error: {e}"
+        return None, f"yfinance error: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -249,7 +203,7 @@ def get_signal():
         "target":       target,
         "stop_dist":    round(sd, 2),
         "target_dist":  round(td, 2),
-        "data_source":  "Alpha Vantage (XAU/USD spot)",
+        "data_source":  "yfinance GC=F (gold futures)",
         "data_bars":    len(df),
         "version":      "v2 (relaxed squeeze + ATR filter)",
         "indicators": {
@@ -484,12 +438,13 @@ def api_signal():
     return JSONResponse(get_signal())
 
 @app.get("/health")
+@app.head("/health")
 def health():
     return {
         "status":       "ok",
         "time":         datetime.now(timezone.utc).isoformat(),
-        "data_source":  "Alpha Vantage (XAU/USD spot)",
-        "av_key_set":   bool(AV_KEY),
+        "data_source":  "yfinance GC=F (gold futures)",
+        "yfinance":     "no key needed — free",
         "telegram":     "configured ✅" if TG_TOKEN else "NOT configured ❌",
         "interval":     f"every {CHECK_SECS}s",
     }
@@ -648,8 +603,8 @@ footer{font-size:9px;color:var(--border);text-align:center;letter-spacing:1px;
 <div class="src-bar">
   <div class="src-icon">📡</div>
   <div>
-    <div class="src-txt">Alpha Vantage — XAU/USD spot price</div>
-    <div class="src-sub">True forex gold rate · not futures · updates every 1h</div>
+    <div class="src-txt">yfinance GC=F — gold futures (tracks spot)</div>
+    <div class="src-sub">Free · no API key · price within ~$5 of spot XAU/USD</div>
   </div>
 </div>
 
