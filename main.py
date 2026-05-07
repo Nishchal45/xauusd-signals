@@ -7,7 +7,7 @@ and 15M/1H technical confirmation for XAU/USD research.
 HOW IT WORKS:
   • Final trade checker runs every 15 minutes
   • It sends Telegram only when the weighted model has an executable trade
-  • Telegram sends one alert per new 15M sweep-triggered trade, plus clear updates
+  • Telegram sends one alert per new 15M sweep-triggered trade
   • Dashboard shows weighted decision, event risk, and validation
   • UptimeRobot ping at /health (HEAD + GET both supported)
 
@@ -15,6 +15,7 @@ ENVIRONMENT VARIABLES:
   TELEGRAM_BOT_TOKEN   → from @BotFather on Telegram
   TELEGRAM_CHAT_ID     → from @userinfobot on Telegram
   TRADE_CHECK_SECONDS  → optional; default 900
+  TRADE_LOG_PATH       → optional; default trade_history.json
 """
 
 from fastapi import FastAPI
@@ -25,6 +26,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from html import escape
+import hashlib
+import json
 import xml.etree.ElementTree as ET
 import uvicorn, os, asyncio, httpx, logging
 
@@ -35,6 +38,7 @@ TG_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID",   "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 TRADE_CHECK_SECONDS = int(os.environ.get("TRADE_CHECK_SECONDS", "900"))
+TRADE_LOG_PATH = os.environ.get("TRADE_LOG_PATH", "trade_history.json")
 CONTEXT_TTL_SECONDS = int(os.environ.get("CONTEXT_TTL_SECONDS", "300"))
 CONTEXT_CACHE = {"ts": None, "data": None}
 EVENT_STUDY_TTL_SECONDS = int(os.environ.get("EVENT_STUDY_TTL_SECONDS", "21600"))
@@ -505,6 +509,8 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "bar_time": str(df.index[-1]),
         "price": round(price, 2),
+        "latest_high": round(safe_float(df['high'].iloc[i]), 2),
+        "latest_low": round(safe_float(df['low'].iloc[i]), 2),
         "change": change,
         "change_pct": change_pct,
         "stop": stop,
@@ -1510,6 +1516,211 @@ def trend_grid_bot_signal(data: dict, context: dict) -> dict:
     }
 
 
+def utc_now_text() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def load_trade_history() -> dict:
+    if not os.path.exists(TRADE_LOG_PATH):
+        return {"version": 1, "trades": []}
+    try:
+        with open(TRADE_LOG_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        trades = data.get("trades", []) if isinstance(data, dict) else []
+        return {"version": 1, "trades": trades}
+    except Exception as e:
+        log.error(f"Trade history read error: {e}")
+        return {"version": 1, "trades": []}
+
+
+def save_trade_history(history: dict) -> bool:
+    try:
+        directory = os.path.dirname(TRADE_LOG_PATH)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp_path = f"{TRADE_LOG_PATH}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(history, fh, indent=2)
+        os.replace(tmp_path, TRADE_LOG_PATH)
+        return True
+    except Exception as e:
+        log.error(f"Trade history write error: {e}")
+        return False
+
+
+def trade_record_id(alert_key: str) -> str:
+    return hashlib.sha1(alert_key.encode("utf-8")).hexdigest()[:12]
+
+
+def find_trade_record(alert_key: str) -> dict | None:
+    for trade in load_trade_history()["trades"]:
+        if trade.get("alert_key") == alert_key:
+            return trade
+    return None
+
+
+def build_trade_record(snapshot: dict, alert_key: str, source: str = "telegram_alert") -> dict:
+    final = snapshot.get("final", {})
+    trade = final.get("trade", {})
+    sweep = final.get("sweep", {})
+    h1 = snapshot.get("h1", {})
+    m15 = snapshot.get("m15", {})
+    return {
+        "id": trade_record_id(alert_key),
+        "alert_key": alert_key,
+        "source": source,
+        "status": "OPEN",
+        "result": "OPEN",
+        "direction": final.get("direction"),
+        "quality": final.get("quality"),
+        "opened_at": snapshot.get("timestamp") or utc_now_text(),
+        "opened_bar": sweep.get("bar_time") or m15.get("bar_time"),
+        "entry": trade.get("entry"),
+        "stop": trade.get("stop"),
+        "target": trade.get("target"),
+        "target_2": trade.get("target_2"),
+        "risk": trade.get("risk"),
+        "reward": trade.get("reward"),
+        "rr": trade.get("rr"),
+        "size_1pct_10k_oz": trade.get("position_1pct_10k_oz"),
+        "weighted_score": final.get("total_score"),
+        "confidence": final.get("confidence"),
+        "h1_score": h1.get("technical_score"),
+        "m15_score": m15.get("technical_score"),
+        "sweep_summary": sweep.get("summary"),
+        "reason": final.get("reason"),
+        "closed_at": None,
+        "closed_bar": None,
+        "closed_price": None,
+        "observed_price": None,
+        "observed_high": None,
+        "observed_low": None,
+        "r_multiple": None,
+        "pnl_1pct_10k_usd": None,
+    }
+
+
+def record_trade_alert(snapshot: dict, source: str = "telegram_alert") -> tuple[dict | None, bool]:
+    alert_key = trade_alert_key(snapshot)
+    if not alert_key:
+        return None, False
+
+    history = load_trade_history()
+    for trade in history["trades"]:
+        if trade.get("alert_key") == alert_key:
+            return trade, False
+
+    record = build_trade_record(snapshot, alert_key, source=source)
+    history["trades"].append(record)
+    save_trade_history(history)
+    return record, True
+
+
+def close_trade_record(trade: dict, result: str, snapshot: dict) -> dict:
+    m15 = snapshot.get("m15", {})
+    price = safe_float(snapshot.get("price") or m15.get("price"))
+    high = safe_float(m15.get("latest_high"), price)
+    low = safe_float(m15.get("latest_low"), price)
+    entry = safe_float(trade.get("entry"))
+    stop = safe_float(trade.get("stop"))
+    target = safe_float(trade.get("target"))
+    risk = max(safe_float(trade.get("risk")), 1e-9)
+    direction = trade.get("direction")
+    closed_price = target if result == "TP" else stop
+    pnl_per_oz = closed_price - entry if direction == "LONG" else entry - closed_price
+    r_multiple = pnl_per_oz / risk
+
+    trade.update({
+        "status": "CLOSED",
+        "result": result,
+        "closed_at": snapshot.get("timestamp") or utc_now_text(),
+        "closed_bar": m15.get("bar_time"),
+        "closed_price": round(closed_price, 2),
+        "observed_price": round(price, 2),
+        "observed_high": round(high, 2),
+        "observed_low": round(low, 2),
+        "r_multiple": round(r_multiple, 2),
+        "pnl_1pct_10k_usd": round(r_multiple * 100, 2),
+    })
+    return trade
+
+
+def trade_hit_result(trade: dict, snapshot: dict) -> str | None:
+    if trade.get("status") != "OPEN":
+        return None
+
+    m15 = snapshot.get("m15", {})
+    current_bar = m15.get("bar_time")
+    if current_bar and current_bar == trade.get("opened_bar"):
+        return None
+
+    price = safe_float(snapshot.get("price") or m15.get("price"))
+    high = safe_float(m15.get("latest_high"), price)
+    low = safe_float(m15.get("latest_low"), price)
+    stop = safe_float(trade.get("stop"))
+    target = safe_float(trade.get("target"))
+    direction = trade.get("direction")
+
+    if direction == "LONG":
+        hit_sl = low <= stop
+        hit_tp = high >= target
+    elif direction == "SHORT":
+        hit_sl = high >= stop
+        hit_tp = low <= target
+    else:
+        return None
+
+    if hit_sl and hit_tp:
+        return "SL"
+    if hit_tp:
+        return "TP"
+    if hit_sl:
+        return "SL"
+    return None
+
+
+def update_trade_results(snapshot: dict) -> list[dict]:
+    history = load_trade_history()
+    updated = []
+    for trade in history["trades"]:
+        result = trade_hit_result(trade, snapshot)
+        if result:
+            updated.append(close_trade_record(trade, result, snapshot))
+
+    if updated:
+        save_trade_history(history)
+    return updated
+
+
+def trade_history_summary(trades: list[dict]) -> dict:
+    closed = [trade for trade in trades if trade.get("status") == "CLOSED"]
+    wins = [trade for trade in closed if trade.get("result") == "TP"]
+    losses = [trade for trade in closed if trade.get("result") == "SL"]
+    pnl = sum(safe_float(trade.get("pnl_1pct_10k_usd")) for trade in closed)
+    r_total = sum(safe_float(trade.get("r_multiple")) for trade in closed)
+    return {
+        "total": len(trades),
+        "open": len([trade for trade in trades if trade.get("status") == "OPEN"]),
+        "closed": len(closed),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
+        "net_r": round(r_total, 2),
+        "pnl_1pct_10k_usd": round(pnl, 2),
+    }
+
+
+def trade_history_payload(limit: int = 50) -> dict:
+    trades = load_trade_history()["trades"]
+    recent = list(reversed(trades))[:limit]
+    return {
+        "summary": trade_history_summary(trades),
+        "trades": recent,
+        "path": TRADE_LOG_PATH,
+        "note": "Result tracking uses observed 15M candle high/low; if TP and SL are both touched in one bar, SL is recorded conservatively.",
+    }
+
+
 def get_trade_snapshot(force_context: bool = False) -> dict:
     data = get_both_signals()
     context = get_market_context(force=force_context)
@@ -1525,6 +1736,7 @@ def get_dashboard_snapshot(force: bool = False) -> dict:
     return {
         **snapshot,
         "event_study": get_event_study(),
+        "trade_history": trade_history_payload(),
         "trend_grid_bot": trend_grid_bot_signal(snapshot, snapshot["context"]),
     }
 
@@ -1642,6 +1854,28 @@ def msg_trade_alert(snapshot: dict) -> str:
         f"{html_text(next_event.get('eta') or '')}\n"
         f"🕐 <i>{html_text(snapshot.get('timestamp'))}</i>\n"
         f"<i>Research only, not financial advice.</i>"
+    )
+
+
+def msg_trade_result(trade: dict) -> str:
+    result = trade.get("result")
+    direction = trade.get("direction")
+    side = "✅" if result == "TP" else "🛑"
+    label = "TAKE PROFIT HIT" if result == "TP" else "STOP LOSS HIT"
+    pnl = safe_float(trade.get("pnl_1pct_10k_usd"))
+    pnl_sign = "+" if pnl > 0 else ""
+    return (
+        f"{side} <b>XAU/USD RESULT — {label}</b>\n\n"
+        f"Direction: <b>{html_text(direction)}</b>\n"
+        f"Entry: <code>{fmt_money(trade.get('entry'))}</code>\n"
+        f"Exit: <code>{fmt_money(trade.get('closed_price'))}</code>\n"
+        f"Stop: <code>{fmt_money(trade.get('stop'))}</code> · "
+        f"TP: <code>{fmt_money(trade.get('target'))}</code>\n\n"
+        f"R multiple: <code>{safe_float(trade.get('r_multiple')):+.2f}R</code>\n"
+        f"P/L on 1% risk / $10k: <code>{pnl_sign}${pnl:.2f}</code>\n\n"
+        f"Observed 15M range: <code>{fmt_money(trade.get('observed_low'))}</code> - "
+        f"<code>{fmt_money(trade.get('observed_high'))}</code>\n"
+        f"Closed: <i>{html_text(trade.get('closed_at'))}</i>"
     )
 
 
@@ -1765,29 +1999,32 @@ def msg_startup() -> str:
 # ═══════════════════════════════════════════════════════════════════
 async def trade_checker(check_secs: int):
     log.info(f"[TRADE] started — every {check_secs}s")
-    prev_key = None
-    prev_direction = None
+    last_alert_key = None
 
     while True:
         try:
             snapshot = get_trade_snapshot()
+            for closed_trade in update_trade_results(snapshot):
+                log.info(f"[TRADE] {closed_trade.get('result')} {closed_trade.get('direction')} {closed_trade.get('id')}")
+                await tg_send(msg_trade_result(closed_trade))
+
             final = snapshot.get("final", {})
             key = trade_alert_key(snapshot)
 
             if key:
                 direction = final.get("direction")
-                if key != prev_key:
+                existing_trade = find_trade_record(key)
+                if existing_trade:
+                    last_alert_key = key
+                    log.info(f"[TRADE] {direction} already recorded as {existing_trade.get('id')}")
+                elif key != last_alert_key:
                     log.info(f"[TRADE] 🚨 {direction} @ ${final.get('trade', {}).get('entry')}")
-                    await tg_send(msg_trade_alert(snapshot))
-                    prev_key = key
-                    prev_direction = direction
+                    sent = await tg_send(msg_trade_alert(snapshot))
+                    if sent:
+                        record_trade_alert(snapshot)
+                        last_alert_key = key
                 else:
                     log.info(f"[TRADE] active {direction}; duplicate alert suppressed")
-            elif prev_key and prev_direction:
-                log.info(f"[TRADE] cleared {prev_direction}: {final.get('direction')} {final.get('quality')}")
-                await tg_send(msg_trade_cleared(prev_direction, snapshot))
-                prev_key = None
-                prev_direction = None
             else:
                 log.info(f"[TRADE] no executable trade: {final.get('direction')} {final.get('quality')}")
 
@@ -1929,17 +2166,39 @@ async def check_now(token: str = ""):
     snapshot = get_trade_snapshot(force_context=True)
     decision = snapshot.get("final", {})
     if is_executable_trade(decision):
+        alert_key = trade_alert_key(snapshot)
+        existing_trade = find_trade_record(alert_key) if alert_key else None
+        if existing_trade:
+            return {
+                **snapshot,
+                "notification_sent": False,
+                "already_recorded": True,
+                "trade_record": existing_trade,
+                "trade_alert_key": alert_key,
+            }
+
         ok = await tg_send(msg_trade_alert(snapshot))
+        record, recorded = record_trade_alert(snapshot, source="check_now") if ok else (None, False)
         return {
             **snapshot,
             "notification_sent": ok,
-            "trade_alert_key": trade_alert_key(snapshot),
+            "recorded": recorded,
+            "trade_record": record,
+            "trade_alert_key": alert_key,
         }
     return {
         **snapshot,
         "notification_sent": False,
         "reason": decision.get("reason"),
     }
+
+
+@app.get("/api/trades")
+def api_trades(refresh: bool = False, limit: int = 100):
+    if refresh:
+        data = get_both_signals()
+        update_trade_results(data)
+    return JSONResponse(trade_history_payload(limit=max(1, min(limit, 500))))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1956,7 +2215,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box}body{margin:0;background:#0b0b09;color:#ece7dc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 main{max-width:1440px;margin:0 auto;padding:16px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:12px}
 h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.sub{font-size:12px;color:#9f9a8f;margin-top:4px}.stamp{font-size:12px;color:#9f9a8f;text-align:right}
-button{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700}button:hover{border-color:#b99036}
+button,.navlink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,.navlink:hover{border-color:#b99036}
 .grid{display:grid;gap:10px}.hero{grid-template-columns:1.25fr .75fr}.four{grid-template-columns:repeat(4,1fr)}.three{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:repeat(2,1fr)}
 .panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.panel.tight{padding:10px}
 .label{font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.muted{color:#9f9a8f}.small{font-size:12px}.tiny{font-size:11px}.long{color:#4ecb71}.short{color:#ef6a5b}.wait{color:#d7a93f}.blue{color:#6bb7d7}.violet{color:#b999e6}
@@ -1980,7 +2239,7 @@ canvas{width:100%;height:92px;display:block;margin-top:8px}.tf-head{display:flex
       <h1>AURUM Risk OS</h1>
       <div class="sub">XAU/USD intraday cockpit: live news search, scheduled event risk, public-web sentiment, 1H EMA regime, 15M liquidity sweep execution.</div>
     </div>
-    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button></div>
+    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/trades">Trade Journal</a></div>
   </div>
   <div id="app"><div class="panel">Loading market state...</div></div>
   <div class="foot">Research only, not financial advice. Free feeds can lag or fail; liquidity-sweep signals are rules-based approximations, not broker-grade order-flow data.</div>
@@ -2197,6 +2456,93 @@ setInterval(()=>loadDashboard(true),300000);
 </script>
 </body>
 </html>"""
+
+TRADES_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b0b09">
+<title>XAU/USD Trade Journal</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b0b09;color:#ece7dc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1280px;margin:0 auto;padding:16px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:12px}
+h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.sub{font-size:12px;color:#9f9a8f;margin-top:4px}.stamp{font-size:12px;color:#9f9a8f;text-align:right}
+button,a.btn{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,a.btn:hover{border-color:#b99036}
+.panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.grid{display:grid;gap:10px}.four{grid-template-columns:repeat(4,1fr)}
+.metric{background:#10100c;border:1px solid #28251d;border-radius:7px;padding:10px}.metric span{display:block;font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.metric b{display:block;font-size:22px;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #2c2a21;padding:8px 6px;vertical-align:top}th{color:#9f9a8f;font-size:10px;text-transform:uppercase;letter-spacing:.1em}tr:last-child td{border-bottom:0}
+.long{color:#4ecb71}.short{color:#ef6a5b}.wait{color:#d7a93f}.muted{color:#9f9a8f}.tiny{font-size:11px}.pill{border:1px solid #393528;background:#1b1a14;border-radius:999px;padding:5px 8px;font-size:11px;display:inline-block}
+.note{font-size:11px;color:#817b70;margin-top:10px;line-height:1.45}
+@media(max-width:900px){main{padding:11px}.top,.four{grid-template-columns:1fr}.stamp{text-align:left}table{font-size:11px;display:block;overflow-x:auto;white-space:nowrap}}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>XAU/USD Trade Journal</h1>
+      <div class="sub">Executed alert record with TP/SL outcome tracking from observed 15M candle ranges.</div>
+    </div>
+    <div class="stamp"><div id="status">loading...</div><button onclick="loadTrades(true)">Refresh</button><a class="btn" href="/">Cockpit</a></div>
+  </div>
+  <div id="app" class="panel">Loading trade journal...</div>
+</main>
+<script>
+const money=v=>v==null?'--':'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const signed=v=>v==null?'--':(Number(v)>0?'+':'')+Number(v).toFixed(2);
+const cls=v=>v==='TP'||Number(v)>0?'long':v==='SL'||Number(v)<0?'short':'wait';
+const dirCls=d=>(d||'').includes('LONG')?'long':(d||'').includes('SHORT')?'short':'wait';
+
+function metrics(summary){
+  return `<div class="grid four">
+    <div class="metric"><span>Total</span><b>${summary.total||0}</b></div>
+    <div class="metric"><span>Open</span><b class="wait">${summary.open||0}</b></div>
+    <div class="metric"><span>Win rate</span><b class="${summary.win_rate>=50?'long':'short'}">${summary.win_rate||0}%</b></div>
+    <div class="metric"><span>Net R / $10k</span><b class="${cls(summary.net_r)}">${signed(summary.net_r)}R · ${money(summary.pnl_1pct_10k_usd)}</b></div>
+  </div>`;
+}
+
+function render(data){
+  const summary=data.summary||{}, trades=data.trades||[];
+  const rows=trades.map(t=>`<tr>
+    <td><span class="pill ${cls(t.result)}">${esc(t.result||'OPEN')}</span><div class="tiny muted">${esc(t.id)}</div></td>
+    <td><b class="${dirCls(t.direction)}">${esc(t.direction)}</b><div class="tiny muted">${esc(t.quality||'')}</div></td>
+    <td>${money(t.entry)}<div class="tiny muted">${esc(t.opened_at||'')}</div></td>
+    <td class="short">${money(t.stop)}</td>
+    <td class="long">${money(t.target)}</td>
+    <td>${money(t.closed_price)}<div class="tiny muted">${esc(t.closed_at||'open')}</div></td>
+    <td class="${cls(t.r_multiple)}">${t.r_multiple==null?'--':signed(t.r_multiple)+'R'}<div class="tiny">${money(t.pnl_1pct_10k_usd)}</div></td>
+    <td>${esc(t.sweep_summary||'')}<div class="tiny muted">15M ${esc(t.opened_bar||'')}</div></td>
+  </tr>`).join('')||'<tr><td colspan="8" class="muted">No executed trade alerts recorded yet.</td></tr>';
+  document.getElementById('app').innerHTML=`${metrics(summary)}
+    <table><thead><tr><th>Result</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Exit</th><th>R / P&L</th><th>Trigger</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="note">${esc(data.note||'')}</div>`;
+}
+
+async function loadTrades(refresh=false){
+  document.getElementById('status').textContent='loading...';
+  try{
+    const response=await fetch(`/api/trades?refresh=${refresh?'1':'0'}&limit=200&ts=${Date.now()}`);
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const data=await response.json();
+    render(data);
+    document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
+  }catch(error){
+    document.getElementById('status').textContent='offline';
+    document.getElementById('app').innerHTML=`<span class="short">Trade journal error: ${esc(error.message)}</span>`;
+  }
+}
+loadTrades(true);
+setInterval(()=>loadTrades(true),300000);
+</script>
+</body>
+</html>"""
+
+@app.get("/trades", response_class=HTMLResponse)
+def trades_page():
+    return HTMLResponse(TRADES_HTML)
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
