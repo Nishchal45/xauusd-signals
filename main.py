@@ -2,12 +2,12 @@
 XAU/USD Live Signal Server  —  Gold Intelligence Score
 ======================================================
 Combines free macro drivers, market/news context, event risk,
-and 15M/1H technical confirmation for XAU/USD research.
+and 5M/15M/1H technical confirmation for XAU/USD research.
 
 HOW IT WORKS:
   • Final trade checker runs every 15 minutes
   • It sends Telegram only when the weighted model has an executable trade
-  • Telegram sends one alert per new 15M sweep-triggered trade
+  • Telegram sends one alert per new 15M/5M sweep-triggered trade
   • Dashboard shows weighted decision, event risk, and validation
   • UptimeRobot ping at /health (HEAD + GET both supported)
 
@@ -127,12 +127,18 @@ UPCOMING_EVENTS = [
 # ═══════════════════════════════════════════════════════════════════
 #  DATA FETCHER
 # ═══════════════════════════════════════════════════════════════════
+def timeframe_label(interval: str) -> str:
+    return {"5m": "5M", "15m": "15M", "1h": "1H"}.get(interval, interval.upper())
+
+
 def fetch_data(interval: str) -> tuple:
-    """interval = '1h' or '15m'. Returns (DataFrame, error_or_None)."""
+    """interval = '1h', '15m', or '5m'. Returns (DataFrame, error_or_None)."""
     try:
         import yfinance as yf
-        period   = "60d" if interval == "1h" else "30d"
-        min_bars = 220   if interval == "1h" else 400
+        periods = {"1h": "60d", "15m": "30d", "5m": "30d"}
+        min_bars_by_interval = {"1h": 220, "15m": 400, "5m": 800}
+        period = periods.get(interval, "30d")
+        min_bars = min_bars_by_interval.get(interval, 400)
         df = yf.download("GC=F", period=period, interval=interval,
                          progress=False, auto_adjust=True)
         if df.empty:
@@ -245,8 +251,15 @@ def empty_sweep(lookback: int) -> dict:
 
 
 def detect_liquidity_sweep(df: pd.DataFrame, at: pd.Series, interval: str) -> dict:
-    lookback = 48 if interval == "15m" else 30
-    scan_bars = 5 if interval == "15m" else 3
+    if interval == "5m":
+        lookback = 72
+        scan_bars = 9
+    elif interval == "15m":
+        lookback = 48
+        scan_bars = 5
+    else:
+        lookback = 30
+        scan_bars = 3
     idx_now = len(df) - 1
     best = empty_sweep(lookback)
 
@@ -329,7 +342,7 @@ def build_trade_plan(price: float, atr_value: float, setup_direction: str, sweep
             "reward": None,
             "rr": None,
             "position_1pct_10k_oz": None,
-            "invalidates": "No trade without aligned 1H regime and 15M sweep.",
+            "invalidates": "No trade without aligned 1H regime and execution-timeframe sweep.",
         }
 
     buffer = max(atr_value * 0.18, price * 0.00015)
@@ -340,7 +353,7 @@ def build_trade_plan(price: float, atr_value: float, setup_direction: str, sweep
         risk = price - stop
         target = price + risk * 2.0
         target_2 = sweep.get("opposite_liquidity") or price + risk * 3.0
-        invalidates = "15M closes back below the sweep extreme or 1H EMA stack flips bearish."
+        invalidates = "Execution timeframe closes back below the sweep extreme or 1H EMA stack flips bearish."
     else:
         stop = (sweep.get("extreme") or price + atr_value) + buffer
         if stop <= price:
@@ -348,7 +361,7 @@ def build_trade_plan(price: float, atr_value: float, setup_direction: str, sweep
         risk = stop - price
         target = price - risk * 2.0
         target_2 = sweep.get("opposite_liquidity") or price - risk * 3.0
-        invalidates = "15M closes back above the sweep extreme or 1H EMA stack flips bullish."
+        invalidates = "Execution timeframe closes back above the sweep extreme or 1H EMA stack flips bullish."
 
     reward = abs(target - price)
     return {
@@ -442,7 +455,7 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
 
     sweep_score = 0
     if sweep["confirmed"]:
-        sweep_weight = 44 if interval == "15m" else 24
+        sweep_weight = 44 if interval == "15m" else 34 if interval == "5m" else 24
         sweep_score = sweep_weight if sweep["direction"] == "LONG" else -sweep_weight
 
     confluence_penalty = 0
@@ -463,11 +476,12 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
         100,
     ))
     setup_direction = "LONG" if technical_score > 15 else "SHORT" if technical_score < -15 else "NONE"
-    if interval == "15m":
+    if interval in ("15m", "5m"):
+        execution_threshold = 65 if interval == "15m" else 60
         signal = "LONG" if (
-            technical_score >= 65 and sweep["direction"] == "LONG" and sweep["confirmed"]
+            technical_score >= execution_threshold and sweep["direction"] == "LONG" and sweep["confirmed"]
         ) else "SHORT" if (
-            technical_score <= -65 and sweep["direction"] == "SHORT" and sweep["confirmed"]
+            technical_score <= -execution_threshold and sweep["direction"] == "SHORT" and sweep["confirmed"]
         ) else "WAIT"
     else:
         signal = "LONG" if technical_score >= 62 else "SHORT" if technical_score <= -62 else "WAIT"
@@ -479,12 +493,12 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
     sd = trade["risk"] or atrv
     td = trade["reward"] or atrv * 2
 
-    lookback = 96 if interval == "15m" else 24
+    lookback = 288 if interval == "5m" else 96 if interval == "15m" else 24
     prev_close = float(c.iloc[i - lookback]) if i >= lookback else price
     change = round(price - prev_close, 2)
     change_pct = round((price / prev_close - 1) * 100, 2)
 
-    chart_bars = 288 if interval == "15m" else 72
+    chart_bars = 576 if interval == "5m" else 288 if interval == "15m" else 72
     price_hist = [round(float(v), 2) for v in c.iloc[-chart_bars:] if not np.isnan(v)]
     ema21_hist = [round(float(v), 2) for v in e21.iloc[-chart_bars:] if not np.isnan(v)]
     ema50_hist = [round(float(v), 2) for v in e50.iloc[-chart_bars:] if not np.isnan(v)]
@@ -500,7 +514,7 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
         "not_overextended": extension_penalty == 0,
     }
     conds_met = sum(conditions.values())
-    tf_label = "15M" if interval == "15m" else "1H"
+    tf_label = timeframe_label(interval)
 
     return {
         "timeframe": tf_label,
@@ -566,10 +580,12 @@ def get_signal(interval: str = "1h") -> dict:
 def get_both_signals() -> dict:
     s1h  = get_signal("1h")
     s15m = get_signal("15m")
-    price = s1h.get("price") or s15m.get("price") or 0
+    s5m = get_signal("5m")
+    price = s5m.get("price") or s15m.get("price") or s1h.get("price") or 0
     return {
         "h1":        s1h,
         "m15":       s15m,
+        "m5":        s5m,
         "price":     price,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
@@ -1155,11 +1171,14 @@ def normalized_score(value: float, max_abs: float) -> int:
 def technical_composite(data: dict) -> dict:
     h1 = data.get("h1", {})
     m15 = data.get("m15", {})
+    m5 = data.get("m5", {})
     parts = []
     if isinstance(h1.get("technical_score"), (int, float)):
-        parts.append(("1H", 0.45, float(h1["technical_score"])))
+        parts.append(("1H", 0.40, float(h1["technical_score"])))
     if isinstance(m15.get("technical_score"), (int, float)):
-        parts.append(("15M", 0.55, float(m15["technical_score"])))
+        parts.append(("15M", 0.40, float(m15["technical_score"])))
+    if isinstance(m5.get("technical_score"), (int, float)):
+        parts.append(("5M", 0.20, float(m5["technical_score"])))
     if not parts:
         return {"score": 0, "label": "WAIT", "parts": []}
 
@@ -1171,6 +1190,57 @@ def technical_composite(data: dict) -> dict:
         "label": label,
         "parts": [{"timeframe": tf, "weight": weight, "score": int(round(value))} for tf, weight, value in parts],
     }
+
+
+def execution_signal_candidates(data: dict) -> list[dict]:
+    candidates = []
+    for key, tf in (("m15", "15M"), ("m5", "5M")):
+        signal_data = data.get(key, {})
+        sweep = signal_data.get("liquidity_sweep", {})
+        direction = sweep.get("direction", "NONE") if sweep.get("confirmed") else "NONE"
+        trade = signal_data.get("trade", {})
+        if direction not in ("LONG", "SHORT"):
+            continue
+        if trade.get("stop") is None or trade.get("target") is None:
+            continue
+        candidates.append({
+            "key": key,
+            "timeframe": tf,
+            "direction": direction,
+            "score": int(safe_float(signal_data.get("technical_score"))),
+            "sweep": sweep,
+            "trade": trade,
+        })
+    return candidates
+
+
+def select_execution_signal(data: dict) -> dict:
+    candidates = execution_signal_candidates(data)
+    if not candidates:
+        return {
+            "key": None,
+            "timeframe": None,
+            "direction": "NONE",
+            "score": 0,
+            "sweep": {},
+            "trade": {},
+        }
+
+    def rank(candidate: dict) -> float:
+        timeframe_bonus = 12 if candidate["timeframe"] == "15M" else 0
+        return abs(candidate["score"]) + safe_float(candidate["sweep"].get("score")) * 0.25 + timeframe_bonus
+
+    return max(candidates, key=rank)
+
+
+def micro_execution_aligned(execution: dict, m15_score: float) -> bool:
+    if execution.get("timeframe") != "5M":
+        return True
+    if execution.get("direction") == "LONG":
+        return m15_score >= 10
+    if execution.get("direction") == "SHORT":
+        return m15_score <= -10
+    return False
 
 
 def active_technical_signal(data: dict) -> str:
@@ -1196,11 +1266,17 @@ def final_decision(data: dict, context: dict) -> dict:
     event_level = event_risk.get("level", "LOW")
     h1 = data.get("h1", {})
     m15 = data.get("m15", {})
-    sweep = m15.get("liquidity_sweep", {})
-    trade = m15.get("trade", {})
-    h1_score = h1.get("technical_score", 0)
-    m15_score = m15.get("technical_score", 0)
-    sweep_direction = sweep.get("direction", "NONE") if sweep.get("confirmed") else "NONE"
+    m5 = data.get("m5", {})
+    execution = select_execution_signal(data)
+    sweep = execution.get("sweep", {})
+    trade = execution.get("trade", {})
+    h1_score = int(safe_float(h1.get("technical_score")))
+    m15_score = int(safe_float(m15.get("technical_score")))
+    m5_score = int(safe_float(m5.get("technical_score")))
+    execution_score = execution.get("score", 0)
+    execution_timeframe = execution.get("timeframe")
+    sweep_direction = execution.get("direction", "NONE")
+    execution_aligned = micro_execution_aligned(execution, m15_score)
     agreement = sum([
         1 if macro_score > 15 else -1 if macro_score < -15 else 0,
         1 if news_score > 15 else -1 if news_score < -15 else 0,
@@ -1241,6 +1317,10 @@ def final_decision(data: dict, context: dict) -> dict:
         "trade": trade,
         "h1_score": h1_score,
         "m15_score": m15_score,
+        "m5_score": m5_score,
+        "execution_timeframe": execution_timeframe,
+        "execution_score": execution_score,
+        "execution_aligned": execution_aligned,
     }
 
     if risk == "HIGH":
@@ -1257,26 +1337,50 @@ def final_decision(data: dict, context: dict) -> dict:
                 **base,
                 "direction": "LONG_BIAS",
                 "quality": "NO_TRIGGER",
-                "reason": "Macro/news and EMA regime lean long, but 15M has not swept liquidity and reclaimed yet.",
+                "reason": "Macro/news and EMA regime lean long, but neither 15M nor 5M has swept liquidity and reclaimed yet.",
             }
         if weighted_score <= -30:
             return {
                 **base,
                 "direction": "SHORT_BIAS",
                 "quality": "NO_TRIGGER",
-                "reason": "Macro/news and EMA regime lean short, but 15M has not swept liquidity and rejected yet.",
+                "reason": "Macro/news and EMA regime lean short, but neither 15M nor 5M has swept liquidity and rejected yet.",
             }
         return {
             **base,
             "direction": "WAIT",
             "quality": "NO_TRIGGER",
-            "reason": "No fresh 15M liquidity sweep. Wait for stop-run/reclaim before taking intraday risk.",
+            "reason": "No fresh 15M/5M liquidity sweep. Wait for stop-run/reclaim before taking intraday risk.",
         }
 
-    long_allowed = sweep_direction == "LONG" and h1_score >= 10 and m15_score >= 45 and weighted_score >= 35
-    short_allowed = sweep_direction == "SHORT" and h1_score <= -10 and m15_score <= -45 and weighted_score <= -35
-    countertrend_long = sweep_direction == "LONG" and h1_score > -25 and weighted_score >= 58
-    countertrend_short = sweep_direction == "SHORT" and h1_score < 25 and weighted_score <= -58
+    long_allowed = (
+        sweep_direction == "LONG"
+        and h1_score >= 10
+        and execution_score >= 45
+        and weighted_score >= 35
+        and execution_aligned
+    )
+    short_allowed = (
+        sweep_direction == "SHORT"
+        and h1_score <= -10
+        and execution_score <= -45
+        and weighted_score <= -35
+        and execution_aligned
+    )
+    countertrend_long = (
+        sweep_direction == "LONG"
+        and h1_score > -25
+        and weighted_score >= 58
+        and execution_score >= 45
+        and execution_aligned
+    )
+    countertrend_short = (
+        sweep_direction == "SHORT"
+        and h1_score < 25
+        and weighted_score <= -58
+        and execution_score <= -45
+        and execution_aligned
+    )
 
     if long_allowed or countertrend_long:
         quality = "CAUTION" if risk == "MEDIUM" else "CONFIRMED"
@@ -1286,7 +1390,7 @@ def final_decision(data: dict, context: dict) -> dict:
             **base,
             "direction": "LONG",
             "quality": quality,
-            "reason": f"15M swept sell-side liquidity and reclaimed; 1H EMA regime/score supports a long. Weighted score {weighted_score:+d}.",
+            "reason": f"{execution_timeframe} swept sell-side liquidity and reclaimed; 1H EMA regime/score supports a long. Weighted score {weighted_score:+d}.",
         }
     if short_allowed or countertrend_short:
         quality = "CAUTION" if risk == "MEDIUM" else "CONFIRMED"
@@ -1296,22 +1400,23 @@ def final_decision(data: dict, context: dict) -> dict:
             **base,
             "direction": "SHORT",
             "quality": quality,
-            "reason": f"15M swept buy-side liquidity and rejected; 1H EMA regime/score supports a short. Weighted score {weighted_score:+d}.",
+            "reason": f"{execution_timeframe} swept buy-side liquidity and rejected; 1H EMA regime/score supports a short. Weighted score {weighted_score:+d}.",
         }
 
+    alignment_note = " 5M execution also requires directional support from 15M." if execution_timeframe == "5M" and not execution_aligned else ""
     if sweep_direction == "LONG":
         return {
             **base,
             "direction": "LONG_BIAS",
             "quality": "MISMATCH",
-            "reason": "15M liquidity sweep is long, but 1H EMA regime or macro/news score is not strong enough for execution.",
+            "reason": f"{execution_timeframe} liquidity sweep is long, but 1H/15M regime or macro/news score is not strong enough for execution.{alignment_note}",
         }
     if sweep_direction == "SHORT":
         return {
             **base,
             "direction": "SHORT_BIAS",
             "quality": "MISMATCH",
-            "reason": "15M liquidity sweep is short, but 1H EMA regime or macro/news score is not strong enough for execution.",
+            "reason": f"{execution_timeframe} liquidity sweep is short, but 1H/15M regime or macro/news score is not strong enough for execution.{alignment_note}",
         }
     return {
         **base,
@@ -1559,12 +1664,27 @@ def find_trade_record(alert_key: str) -> dict | None:
     return None
 
 
+def execution_key_for_timeframe(timeframe: str | None) -> str:
+    return "m5" if timeframe == "5M" else "m15"
+
+
+def snapshot_execution_data(snapshot: dict, timeframe: str | None) -> dict:
+    key = execution_key_for_timeframe(timeframe)
+    execution_data = snapshot.get(key, {})
+    if not execution_data or execution_data.get("error"):
+        return snapshot.get("m15", {})
+    return execution_data
+
+
 def build_trade_record(snapshot: dict, alert_key: str, source: str = "telegram_alert") -> dict:
     final = snapshot.get("final", {})
     trade = final.get("trade", {})
     sweep = final.get("sweep", {})
     h1 = snapshot.get("h1", {})
     m15 = snapshot.get("m15", {})
+    m5 = snapshot.get("m5", {})
+    execution_timeframe = final.get("execution_timeframe") or "15M"
+    execution_data = snapshot_execution_data(snapshot, execution_timeframe)
     return {
         "id": trade_record_id(alert_key),
         "alert_key": alert_key,
@@ -1573,8 +1693,9 @@ def build_trade_record(snapshot: dict, alert_key: str, source: str = "telegram_a
         "result": "OPEN",
         "direction": final.get("direction"),
         "quality": final.get("quality"),
+        "execution_timeframe": execution_timeframe,
         "opened_at": snapshot.get("timestamp") or utc_now_text(),
-        "opened_bar": sweep.get("bar_time") or m15.get("bar_time"),
+        "opened_bar": sweep.get("bar_time") or execution_data.get("bar_time"),
         "entry": trade.get("entry"),
         "stop": trade.get("stop"),
         "target": trade.get("target"),
@@ -1587,6 +1708,7 @@ def build_trade_record(snapshot: dict, alert_key: str, source: str = "telegram_a
         "confidence": final.get("confidence"),
         "h1_score": h1.get("technical_score"),
         "m15_score": m15.get("technical_score"),
+        "m5_score": m5.get("technical_score"),
         "sweep_summary": sweep.get("summary"),
         "reason": final.get("reason"),
         "closed_at": None,
@@ -1617,10 +1739,11 @@ def record_trade_alert(snapshot: dict, source: str = "telegram_alert") -> tuple[
 
 
 def close_trade_record(trade: dict, result: str, snapshot: dict) -> dict:
-    m15 = snapshot.get("m15", {})
-    price = safe_float(snapshot.get("price") or m15.get("price"))
-    high = safe_float(m15.get("latest_high"), price)
-    low = safe_float(m15.get("latest_low"), price)
+    execution_timeframe = trade.get("execution_timeframe") or "15M"
+    execution_data = snapshot_execution_data(snapshot, execution_timeframe)
+    price = safe_float(snapshot.get("price") or execution_data.get("price"))
+    high = safe_float(execution_data.get("latest_high"), price)
+    low = safe_float(execution_data.get("latest_low"), price)
     entry = safe_float(trade.get("entry"))
     stop = safe_float(trade.get("stop"))
     target = safe_float(trade.get("target"))
@@ -1634,7 +1757,7 @@ def close_trade_record(trade: dict, result: str, snapshot: dict) -> dict:
         "status": "CLOSED",
         "result": result,
         "closed_at": snapshot.get("timestamp") or utc_now_text(),
-        "closed_bar": m15.get("bar_time"),
+        "closed_bar": execution_data.get("bar_time"),
         "closed_price": round(closed_price, 2),
         "observed_price": round(price, 2),
         "observed_high": round(high, 2),
@@ -1649,14 +1772,15 @@ def trade_hit_result(trade: dict, snapshot: dict) -> str | None:
     if trade.get("status") != "OPEN":
         return None
 
-    m15 = snapshot.get("m15", {})
-    current_bar = m15.get("bar_time")
+    execution_timeframe = trade.get("execution_timeframe") or "15M"
+    execution_data = snapshot_execution_data(snapshot, execution_timeframe)
+    current_bar = execution_data.get("bar_time")
     if current_bar and current_bar == trade.get("opened_bar"):
         return None
 
-    price = safe_float(snapshot.get("price") or m15.get("price"))
-    high = safe_float(m15.get("latest_high"), price)
-    low = safe_float(m15.get("latest_low"), price)
+    price = safe_float(snapshot.get("price") or execution_data.get("price"))
+    high = safe_float(execution_data.get("latest_high"), price)
+    low = safe_float(execution_data.get("latest_low"), price)
     stop = safe_float(trade.get("stop"))
     target = safe_float(trade.get("target"))
     direction = trade.get("direction")
@@ -1717,7 +1841,7 @@ def trade_history_payload(limit: int = 50) -> dict:
         "summary": trade_history_summary(trades),
         "trades": recent,
         "path": TRADE_LOG_PATH,
-        "note": "Result tracking uses observed 15M candle high/low; if TP and SL are both touched in one bar, SL is recorded conservatively.",
+        "note": "Result tracking uses observed execution-timeframe candle high/low; if TP and SL are both touched in one bar, SL is recorded conservatively.",
     }
 
 
@@ -1804,9 +1928,10 @@ def trade_alert_key(snapshot: dict) -> str | None:
         return None
 
     sweep = final.get("sweep", {})
-    m15 = snapshot.get("m15", {})
-    trigger_bar = sweep.get("bar_time") or m15.get("bar_time") or snapshot.get("timestamp")
-    return f"{final.get('direction')}:{trigger_bar}"
+    execution_timeframe = final.get("execution_timeframe") or "15M"
+    execution_data = snapshot_execution_data(snapshot, execution_timeframe)
+    trigger_bar = sweep.get("bar_time") or execution_data.get("bar_time") or snapshot.get("timestamp")
+    return f"{final.get('direction')}:{execution_timeframe}:{trigger_bar}"
 
 
 def msg_trade_alert(snapshot: dict) -> str:
@@ -1815,7 +1940,10 @@ def msg_trade_alert(snapshot: dict) -> str:
     context = snapshot.get("context", {})
     h1 = snapshot.get("h1", {})
     m15 = snapshot.get("m15", {})
+    m5 = snapshot.get("m5", {})
     sweep = final.get("sweep", {})
+    execution_timeframe = final.get("execution_timeframe") or "15M"
+    execution_data = snapshot_execution_data(snapshot, execution_timeframe)
     direction = final.get("direction", "WAIT")
     quality = final.get("quality", "--")
     side = "🟢" if direction == "LONG" else "🔴"
@@ -1841,11 +1969,12 @@ def msg_trade_alert(snapshot: dict) -> str:
         f"📊 <b>Model</b>\n"
         f"Weighted score: <code>{fmt_signed_score(final.get('total_score'))}</code> · "
         f"1H: <code>{fmt_signed_score(h1.get('technical_score'))}</code> · "
-        f"15M: <code>{fmt_signed_score(m15.get('technical_score'))}</code>\n"
+        f"15M: <code>{fmt_signed_score(m15.get('technical_score'))}</code> · "
+        f"5M: <code>{fmt_signed_score(m5.get('technical_score'))}</code>\n"
         f"Risk: <b>{html_text(final.get('risk'))}</b> · Event: <b>{html_text(final.get('event_level'))}</b>\n\n"
         f"🧭 <b>Trigger</b>\n"
         f"{html_text(sweep.get('summary'))}\n"
-        f"15M sweep bar: <code>{html_text(sweep.get('bar_time') or m15.get('bar_time'))}</code>\n\n"
+        f"{html_text(execution_timeframe)} sweep bar: <code>{html_text(sweep.get('bar_time') or execution_data.get('bar_time'))}</code>\n\n"
         f"📋 <b>Reason</b>\n"
         f"{html_text(final.get('reason'))}\n\n"
         f"🚫 <b>Invalidation</b>\n"
@@ -1864,6 +1993,7 @@ def msg_trade_result(trade: dict) -> str:
     label = "TAKE PROFIT HIT" if result == "TP" else "STOP LOSS HIT"
     pnl = safe_float(trade.get("pnl_1pct_10k_usd"))
     pnl_sign = "+" if pnl > 0 else ""
+    execution_timeframe = trade.get("execution_timeframe") or "15M"
     return (
         f"{side} <b>XAU/USD RESULT — {label}</b>\n\n"
         f"Direction: <b>{html_text(direction)}</b>\n"
@@ -1873,7 +2003,7 @@ def msg_trade_result(trade: dict) -> str:
         f"TP: <code>{fmt_money(trade.get('target'))}</code>\n\n"
         f"R multiple: <code>{safe_float(trade.get('r_multiple')):+.2f}R</code>\n"
         f"P/L on 1% risk / $10k: <code>{pnl_sign}${pnl:.2f}</code>\n\n"
-        f"Observed 15M range: <code>{fmt_money(trade.get('observed_low'))}</code> - "
+        f"Observed {html_text(execution_timeframe)} range: <code>{fmt_money(trade.get('observed_low'))}</code> - "
         f"<code>{fmt_money(trade.get('observed_high'))}</code>\n"
         f"Closed: <i>{html_text(trade.get('closed_at'))}</i>"
     )
@@ -1907,7 +2037,7 @@ def msg_signal(d: dict) -> str:
     chg   = d["change"];   chgp  = d["change_pct"]
     arrow = "▲" if chg >= 0 else "▼"
     pos   = round(100 / sd, 4) if sd > 0 else "—"
-    tf_icon = "⚡" if tf == "15M" else "🕐"
+    tf_icon = "⏱" if tf == "5M" else "⚡" if tf == "15M" else "🕐"
     score = d.get("technical_score", 0)
 
     if sig == "LONG":
@@ -1949,10 +2079,10 @@ def msg_approaching(d: dict) -> str:
     cond  = d["conditions"];  ind = d["indicators"]
     price = d["price"];  stop = d["stop"];  target = d["target"]
     sd    = d["stop_dist"];   td  = d["target_dist"]
-    tf_icon   = "⚡" if tf == "15M" else "🕐"
+    tf_icon   = "⏱" if tf == "5M" else "⚡" if tf == "15M" else "🕐"
     direction = d.get("setup_direction", "NONE")
     rows = "\n".join([
-        ("✅" if cond.get("trend_aligned")       else "❌") + " 1H/15M EMA regime aligned",
+        ("✅" if cond.get("trend_aligned")       else "❌") + " EMA regime aligned",
         ("✅" if cond.get("liquidity_sweep")     else "❌") + " Liquidity sweep confirmed",
         ("✅" if cond.get("ema_reclaim")         else "❌") + " EMA reclaim/rejection valid",
         ("✅" if cond.get("momentum_confirmed")  else "❌") + " Momentum confirmed",
@@ -1972,7 +2102,7 @@ def msg_approaching(d: dict) -> str:
 
 
 def msg_cleared(tf: str, prev: str, price: float, ts: str) -> str:
-    tf_icon = "⚡" if tf == "15M" else "🕐"
+    tf_icon = "⏱" if tf == "5M" else "⚡" if tf == "15M" else "🕐"
     return (
         f"⚪ <b>Cleared  {tf_icon} {tf}  —  XAU/USD</b>\n\n"
         f"The <b>{prev}</b> signal is no longer active.\n\n"
@@ -1989,7 +2119,7 @@ def msg_startup() -> str:
         f"Scanning for executable trades every <b>{interval_minutes} minutes</b>.\n"
         "Telegram alerts are sent only when the final model has a <b>LONG</b> or <b>SHORT</b> trade.\n\n"
         "<b>Model:</b> Technical 50% · News 20% · Macro 15% · Sentiment 15%\n"
-        "<b>Strategy:</b> 1H EMA regime + 15M liquidity sweep/reclaim · 1:2 RR\n"
+        "<b>Strategy:</b> 1H EMA regime + 15M/5M liquidity sweep/reclaim · 1:2 RR\n"
         "<b>Data:</b> yfinance + GDELT/Fed RSS + scheduled macro event seeds"
     )
 
@@ -2035,7 +2165,7 @@ async def trade_checker(check_secs: int):
 
 
 async def checker(interval: str, check_secs: int):
-    tf = "15M" if interval == "15m" else "1H"
+    tf = timeframe_label(interval)
     log.info(f"[{tf}] started — every {check_secs}s")
     prev_signal   = None
     prev_bar_time = None
@@ -2055,10 +2185,10 @@ async def checker(interval: str, check_secs: int):
             conds    = data["conditions_met"]
             context  = get_market_context()
             full_data = get_both_signals()
-            full_data["h1" if interval == "1h" else "m15"] = data
+            full_data["h1" if interval == "1h" else "m5" if interval == "5m" else "m15"] = data
             decision = final_decision(full_data, context)
             approved_signal = (
-                interval == "15m"
+                interval in ("15m", "5m")
                 and decision.get("direction") == sig
                 and decision.get("quality") in ("CONFIRMED", "CAUTION", "COUNTERTREND")
             )
@@ -2138,7 +2268,7 @@ def health():
     return {
         "status":   "ok",
         "time":     datetime.now(timezone.utc).isoformat(),
-        "mode":     "EMA regime + 15M liquidity sweep + live news/event sentiment",
+        "mode":     "EMA regime + 15M/5M liquidity sweep + live news/event sentiment",
         "data":     "yfinance GC=F + DXY/10Y/VIX + GDELT/Fed RSS + scheduled macro events",
         "telegram": "configured ✅" if TG_TOKEN and TG_CHAT_ID else "NOT configured ❌",
         "trade_check_seconds": TRADE_CHECK_SECONDS,
@@ -2238,7 +2368,7 @@ canvas{width:100%;height:92px;display:block;margin-top:8px}.tf-head{display:flex
   <div class="top">
     <div>
       <h1>AURUM Risk OS</h1>
-      <div class="sub">XAU/USD intraday cockpit: live news search, scheduled event risk, public-web sentiment, 1H EMA regime, 15M liquidity sweep execution.</div>
+      <div class="sub">XAU/USD intraday cockpit: live news search, scheduled event risk, public-web sentiment, 1H EMA regime, 15M/5M liquidity sweep execution.</div>
       <div class="tabs-nav"><a class="tablink active" href="/">Cockpit</a><a class="tablink" href="/trades">Journal</a></div>
     </div>
     <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/trades">Journal</a></div>
@@ -2299,9 +2429,10 @@ function metrics(items){
 function renderTf(key,data){
   const d=data?.[key]||{}, ind=d.indicators||{}, score=d.technical_score||0, comp=d.components||{}, sweep=d.liquidity_sweep||{};
   const id='chart-'+key;
+  const label=key==='h1'?'1H EMA regime':key==='m15'?'15M execution tape':'5M micro execution tape';
   return `<section class="panel">
     <div class="tf-head">
-      <div><div class="label">${key==='h1'?'1H EMA regime':'15M execution tape'}</div><div class="tf-title ${dirCls(d.setup_direction)}">${esc(d.setup_direction||'NONE')}</div></div>
+      <div><div class="label">${label}</div><div class="tf-title ${dirCls(d.setup_direction)}">${esc(d.setup_direction||'NONE')}</div></div>
       <div class="tf-score ${cls(score)}">${score>0?'+':''}${score}</div>
     </div>
     <canvas id="${id}"></canvas>
@@ -2387,7 +2518,7 @@ function render(data){
           <span class="pill">Confidence <b>${final.confidence??0}%</b></span>
           <span class="pill">Quality <b>${esc(final.quality||'--')}</b></span>
           <span class="pill">Risk <b class="${riskColor}">${esc(context.risk||'--')}</b></span>
-          <span class="pill">15M sweep <b class="${dirCls(final.sweep_direction)}">${esc(final.sweep_direction||'NONE')}</b></span>
+          <span class="pill">Exec sweep <b class="${dirCls(final.sweep_direction)}">${esc(final.execution_timeframe||'--')} ${esc(final.sweep_direction||'NONE')}</b></span>
         </div>
       </div>
       <div>
@@ -2417,8 +2548,8 @@ function render(data){
   <div class="section-title"><h2>EMA200 ADX ATR Grid Signal</h2><span class="muted small">trend-following, ATR-spaced, capped, non-martingale</span></div>
   ${renderGridBot(gridBot)}
 
-  <div class="section-title"><h2>Technical State</h2><span class="muted small">1H regime + 15M liquidity sweep/reclaim</span></div>
-  <div class="grid two">${renderTf('h1',data)}${renderTf('m15',data)}</div>
+  <div class="section-title"><h2>Technical State</h2><span class="muted small">1H regime + 15M/5M liquidity sweep/reclaim</span></div>
+  <div class="grid three">${renderTf('h1',data)}${renderTf('m15',data)}${renderTf('m5',data)}</div>
 
   <div class="section-title"><h2>Live News And Public Sentiment</h2><span class="muted small">${esc(context.timestamp||'')}</span></div>
   <div class="grid two">
@@ -2437,6 +2568,7 @@ function render(data){
   requestAnimationFrame(()=>{
     draw(document.getElementById('chart-h1'),data.h1?.chart,data.h1?.technical_score||0);
     draw(document.getElementById('chart-m15'),data.m15?.chart,data.m15?.technical_score||0);
+    draw(document.getElementById('chart-m5'),data.m5?.chart,data.m5?.technical_score||0);
   });
 }
 
@@ -2485,7 +2617,7 @@ table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}th,td{t
   <div class="top">
     <div>
       <h1>XAU/USD Trade Journal</h1>
-      <div class="sub">Executed alert record with TP/SL outcome tracking from observed 15M candle ranges.</div>
+      <div class="sub">Executed alert record with TP/SL outcome tracking from the alert execution timeframe.</div>
       <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink active" href="/trades">Journal</a></div>
     </div>
     <div class="stamp"><div id="status">loading...</div><button onclick="loadTrades(true)">Refresh</button><a class="btn" href="/">Cockpit</a></div>
@@ -2518,7 +2650,7 @@ function render(data){
     <td class="long">${money(t.target)}</td>
     <td>${money(t.closed_price)}<div class="tiny muted">${esc(t.closed_at||'open')}</div></td>
     <td class="${cls(t.r_multiple)}">${t.r_multiple==null?'--':signed(t.r_multiple)+'R'}<div class="tiny">${money(t.pnl_1pct_10k_usd)}</div></td>
-    <td>${esc(t.sweep_summary||'')}<div class="tiny muted">15M ${esc(t.opened_bar||'')}</div></td>
+    <td>${esc(t.sweep_summary||'')}<div class="tiny muted">${esc(t.execution_timeframe||'15M')} ${esc(t.opened_bar||'')}</div></td>
   </tr>`).join('')||'<tr><td colspan="8" class="muted">No executed trade alerts recorded yet.</td></tr>';
   document.getElementById('app').innerHTML=`${metrics(summary)}
     <table><thead><tr><th>Result</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Exit</th><th>R / P&L</th><th>Trigger</th></tr></thead><tbody>${rows}</tbody></table>
