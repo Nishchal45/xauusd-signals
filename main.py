@@ -1194,7 +1194,7 @@ def technical_composite(data: dict) -> dict:
 
 def execution_signal_candidates(data: dict) -> list[dict]:
     candidates = []
-    for key, tf in (("m15", "15M"), ("m5", "5M")):
+    for key, tf in (("h1", "1H"), ("m15", "15M"), ("m5", "5M")):
         signal_data = data.get(key, {})
         sweep = signal_data.get("liquidity_sweep", {})
         direction = sweep.get("direction", "NONE") if sweep.get("confirmed") else "NONE"
@@ -1227,7 +1227,7 @@ def select_execution_signal(data: dict) -> dict:
         }
 
     def rank(candidate: dict) -> float:
-        timeframe_bonus = 12 if candidate["timeframe"] == "15M" else 0
+        timeframe_bonus = {"1H": 10, "15M": 12, "5M": 0}.get(candidate["timeframe"], 0)
         return abs(candidate["score"]) + safe_float(candidate["sweep"].get("score")) * 0.25 + timeframe_bonus
 
     return max(candidates, key=rank)
@@ -1337,20 +1337,20 @@ def final_decision(data: dict, context: dict) -> dict:
                 **base,
                 "direction": "LONG_BIAS",
                 "quality": "NO_TRIGGER",
-                "reason": "Macro/news and EMA regime lean long, but neither 15M nor 5M has swept liquidity and reclaimed yet.",
+                "reason": "Macro/news and EMA regime lean long, but no 1H/15M/5M execution trade has swept liquidity and reclaimed yet.",
             }
         if weighted_score <= -30:
             return {
                 **base,
                 "direction": "SHORT_BIAS",
                 "quality": "NO_TRIGGER",
-                "reason": "Macro/news and EMA regime lean short, but neither 15M nor 5M has swept liquidity and rejected yet.",
+                "reason": "Macro/news and EMA regime lean short, but no 1H/15M/5M execution trade has swept liquidity and rejected yet.",
             }
         return {
             **base,
             "direction": "WAIT",
             "quality": "NO_TRIGGER",
-            "reason": "No fresh 15M/5M liquidity sweep. Wait for stop-run/reclaim before taking intraday risk.",
+            "reason": "No fresh 1H/15M/5M liquidity sweep. Wait for stop-run/reclaim before taking intraday risk.",
         }
 
     long_allowed = (
@@ -1424,6 +1424,69 @@ def final_decision(data: dict, context: dict) -> dict:
         "quality": "NEUTRAL",
         "reason": f"Weighted score {weighted_score:+d}: no aligned intraday edge yet.",
     }
+
+
+def timeframe_trade_decisions(snapshot: dict) -> list[dict]:
+    context = snapshot.get("context", {})
+    final = snapshot.get("final", {})
+    risk = context.get("risk", "UNKNOWN")
+    event_level = context.get("event_risk", {}).get("level", "LOW")
+    if risk == "HIGH":
+        return []
+
+    decisions = []
+    scores = {
+        "h1_score": snapshot.get("h1", {}).get("technical_score"),
+        "m15_score": snapshot.get("m15", {}).get("technical_score"),
+        "m5_score": snapshot.get("m5", {}).get("technical_score"),
+    }
+    for key, tf in (("h1", "1H"), ("m15", "15M"), ("m5", "5M")):
+        signal_data = snapshot.get(key, {})
+        if signal_data.get("error"):
+            continue
+
+        direction = signal_data.get("signal")
+        trade = signal_data.get("trade", {})
+        if direction not in ("LONG", "SHORT"):
+            continue
+        if trade.get("stop") is None or trade.get("target") is None:
+            continue
+
+        sweep = signal_data.get("liquidity_sweep", {})
+        score = int(safe_float(signal_data.get("technical_score")))
+        confidence = abs(score) + (10 if sweep.get("confirmed") else 0)
+        if risk == "MEDIUM":
+            confidence -= 10
+        confidence = int(clamp(confidence, 5, 95))
+        quality = "CAUTION" if risk == "MEDIUM" else "CONFIRMED"
+        sweep_direction = sweep.get("direction", "NONE") if sweep.get("confirmed") else "NONE"
+        reason = (
+            f"{tf} standalone {direction} trade: score {score:+d}, "
+            f"sweep {sweep_direction}, RR {trade.get('rr') or '--'}."
+        )
+
+        decisions.append({
+            "technical": direction,
+            "technical_detail": final.get("technical_detail", technical_composite(snapshot)),
+            "weights": final.get("weights", {k: int(v * 100) for k, v in MODEL_WEIGHTS.items()}),
+            "weighted_scores": final.get("weighted_scores", {}),
+            "total_score": final.get("total_score"),
+            "confidence": confidence,
+            "risk": risk,
+            "event_level": event_level,
+            "sweep_direction": sweep_direction,
+            "sweep": sweep,
+            "trade": trade,
+            **scores,
+            "execution_timeframe": tf,
+            "execution_score": score,
+            "execution_aligned": True,
+            "direction": direction,
+            "quality": quality,
+            "reason": reason,
+        })
+
+    return decisions
 
 
 def grid_level_plan(price: float, direction: str, step: float, atr_value: float, anchor: float, account_risk: float = 10_000) -> dict:
@@ -1665,7 +1728,11 @@ def find_trade_record(alert_key: str) -> dict | None:
 
 
 def execution_key_for_timeframe(timeframe: str | None) -> str:
-    return "m5" if timeframe == "5M" else "m15"
+    if timeframe == "1H":
+        return "h1"
+    if timeframe == "5M":
+        return "m5"
+    return "m15"
 
 
 def snapshot_execution_data(snapshot: dict, timeframe: str | None) -> dict:
@@ -1848,11 +1915,13 @@ def trade_history_payload(limit: int = 50) -> dict:
 def get_trade_snapshot(force_context: bool = False) -> dict:
     data = get_both_signals()
     context = get_market_context(force=force_context)
-    return {
+    snapshot = {
         **data,
         "context": context,
         "final": final_decision(data, context),
     }
+    snapshot["timeframe_trades"] = timeframe_trade_decisions(snapshot)
+    return snapshot
 
 
 def get_dashboard_snapshot(force: bool = False) -> dict:
@@ -1922,6 +1991,15 @@ def is_executable_trade(decision: dict) -> bool:
     )
 
 
+def executable_trade_snapshots(snapshot: dict) -> list[dict]:
+    trade_decisions = snapshot.get("timeframe_trades") or timeframe_trade_decisions(snapshot)
+    snapshots = []
+    for decision in trade_decisions:
+        if is_executable_trade(decision):
+            snapshots.append({**snapshot, "final": decision})
+    return snapshots
+
+
 def trade_alert_key(snapshot: dict) -> str | None:
     final = snapshot.get("final", {})
     if not is_executable_trade(final):
@@ -1955,8 +2033,9 @@ def msg_trade_alert(snapshot: dict) -> str:
     next_event = context.get("event_risk", {}).get("next_event") or {}
 
     return (
-        f"{side} <b>XAU/USD TRADE — {html_text(direction)}</b>\n"
-        f"<b>{action}</b> · Quality: <b>{html_text(quality)}</b> · Confidence: <b>{final.get('confidence', 0)}%</b>\n\n"
+        f"{side} <b>XAU/USD TRADE — {html_text(execution_timeframe)} {html_text(direction)}</b>\n"
+        f"<b>{action}</b> · Timeframe: <b>{html_text(execution_timeframe)}</b> · "
+        f"Quality: <b>{html_text(quality)}</b> · Confidence: <b>{final.get('confidence', 0)}%</b>\n\n"
         f"💰 <b>Entry</b>        <code>{fmt_money(trade.get('entry'))}</code>\n"
         f"🛑 <b>Stop</b>         <code>{fmt_money(trade.get('stop'))}</code>  "
         f"Risk <code>{fmt_money(trade.get('risk'))}</code>\n"
@@ -1996,7 +2075,7 @@ def msg_trade_result(trade: dict) -> str:
     execution_timeframe = trade.get("execution_timeframe") or "15M"
     return (
         f"{side} <b>XAU/USD RESULT — {label}</b>\n\n"
-        f"Direction: <b>{html_text(direction)}</b>\n"
+        f"Direction: <b>{html_text(execution_timeframe)} {html_text(direction)}</b>\n"
         f"Entry: <code>{fmt_money(trade.get('entry'))}</code>\n"
         f"Exit: <code>{fmt_money(trade.get('closed_price'))}</code>\n"
         f"Stop: <code>{fmt_money(trade.get('stop'))}</code> · "
@@ -2117,9 +2196,9 @@ def msg_startup() -> str:
     return (
         "✅ <b>XAU/USD Intelligence Bot Online</b>\n\n"
         f"Scanning for executable trades every <b>{interval_minutes} minutes</b>.\n"
-        "Telegram alerts are sent only when the final model has a <b>LONG</b> or <b>SHORT</b> trade.\n\n"
+        "Telegram alerts are sent for executable <b>1H</b>, <b>15M</b>, and <b>5M</b> trades.\n\n"
         "<b>Model:</b> Technical 50% · News 20% · Macro 15% · Sentiment 15%\n"
-        "<b>Strategy:</b> 1H EMA regime + 15M/5M liquidity sweep/reclaim · 1:2 RR\n"
+        "<b>Strategy:</b> 1H/15M/5M liquidity sweep/reclaim · 1:2 RR\n"
         "<b>Data:</b> yfinance + GDELT/Fed RSS + scheduled macro event seeds"
     )
 
@@ -2129,7 +2208,7 @@ def msg_startup() -> str:
 # ═══════════════════════════════════════════════════════════════════
 async def trade_checker(check_secs: int):
     log.info(f"[TRADE] started — every {check_secs}s")
-    last_alert_key = None
+    last_alert_keys = set()
 
     while True:
         try:
@@ -2138,25 +2217,31 @@ async def trade_checker(check_secs: int):
                 log.info(f"[TRADE] {closed_trade.get('result')} {closed_trade.get('direction')} {closed_trade.get('id')}")
                 await tg_send(msg_trade_result(closed_trade))
 
-            final = snapshot.get("final", {})
-            key = trade_alert_key(snapshot)
+            trade_snapshots = executable_trade_snapshots(snapshot)
+            if trade_snapshots:
+                for trade_snapshot in trade_snapshots:
+                    final = trade_snapshot.get("final", {})
+                    key = trade_alert_key(trade_snapshot)
+                    if not key:
+                        continue
 
-            if key:
-                direction = final.get("direction")
-                existing_trade = find_trade_record(key)
-                if existing_trade:
-                    last_alert_key = key
-                    log.info(f"[TRADE] {direction} already recorded as {existing_trade.get('id')}")
-                elif key != last_alert_key:
-                    log.info(f"[TRADE] 🚨 {direction} @ ${final.get('trade', {}).get('entry')}")
-                    sent = await tg_send(msg_trade_alert(snapshot))
-                    if sent:
-                        record_trade_alert(snapshot)
-                        last_alert_key = key
-                else:
-                    log.info(f"[TRADE] active {direction}; duplicate alert suppressed")
+                    direction = final.get("direction")
+                    timeframe = final.get("execution_timeframe")
+                    existing_trade = find_trade_record(key)
+                    if existing_trade:
+                        last_alert_keys.add(key)
+                        log.info(f"[TRADE] {timeframe} {direction} already recorded as {existing_trade.get('id')}")
+                    elif key not in last_alert_keys:
+                        log.info(f"[TRADE] 🚨 {timeframe} {direction} @ ${final.get('trade', {}).get('entry')}")
+                        sent = await tg_send(msg_trade_alert(trade_snapshot))
+                        if sent:
+                            record_trade_alert(trade_snapshot)
+                            last_alert_keys.add(key)
+                    else:
+                        log.info(f"[TRADE] active {timeframe} {direction}; duplicate alert suppressed")
             else:
-                log.info(f"[TRADE] no executable trade: {final.get('direction')} {final.get('quality')}")
+                final = snapshot.get("final", {})
+                log.info(f"[TRADE] no executable timeframe trade: {final.get('direction')} {final.get('quality')}")
 
         except Exception as e:
             log.error(f"[TRADE] error: {e}")
@@ -2268,7 +2353,7 @@ def health():
     return {
         "status":   "ok",
         "time":     datetime.now(timezone.utc).isoformat(),
-        "mode":     "EMA regime + 15M/5M liquidity sweep + live news/event sentiment",
+        "mode":     "EMA regime + 1H/15M/5M liquidity sweep + live news/event sentiment",
         "data":     "yfinance GC=F + DXY/10Y/VIX + GDELT/Fed RSS + scheduled macro events",
         "telegram": "configured ✅" if TG_TOKEN and TG_CHAT_ID else "NOT configured ❌",
         "trade_check_seconds": TRADE_CHECK_SECONDS,
@@ -2284,7 +2369,7 @@ async def test_notification(token: str = ""):
         "🧪 <b>Test — XAU/USD Intelligence Bot</b>\n\n"
         "✅ Telegram working!\n\n"
         f"Trade scanner interval: {max(1, TRADE_CHECK_SECONDS // 60)} minutes\n"
-        "Alerts only send when the final model has an executable LONG/SHORT trade.\n\n"
+        "Alerts send when 1H, 15M, or 5M has an executable LONG/SHORT trade.\n\n"
         "<i>Test only.</i>"
     )
     return {"sent": ok}
@@ -2294,28 +2379,42 @@ async def check_now(token: str = ""):
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         return JSONResponse({"error": "admin token required"}, status_code=403)
     snapshot = get_trade_snapshot(force_context=True)
-    decision = snapshot.get("final", {})
-    if is_executable_trade(decision):
-        alert_key = trade_alert_key(snapshot)
-        existing_trade = find_trade_record(alert_key) if alert_key else None
-        if existing_trade:
-            return {
-                **snapshot,
-                "notification_sent": False,
-                "already_recorded": True,
-                "trade_record": existing_trade,
-                "trade_alert_key": alert_key,
-            }
+    trade_snapshots = executable_trade_snapshots(snapshot)
+    if trade_snapshots:
+        notifications = []
+        for trade_snapshot in trade_snapshots:
+            decision = trade_snapshot.get("final", {})
+            alert_key = trade_alert_key(trade_snapshot)
+            existing_trade = find_trade_record(alert_key) if alert_key else None
+            if existing_trade:
+                notifications.append({
+                    "sent": False,
+                    "already_recorded": True,
+                    "timeframe": decision.get("execution_timeframe"),
+                    "direction": decision.get("direction"),
+                    "trade_record": existing_trade,
+                    "trade_alert_key": alert_key,
+                })
+                continue
 
-        ok = await tg_send(msg_trade_alert(snapshot))
-        record, recorded = record_trade_alert(snapshot, source="check_now") if ok else (None, False)
+            ok = await tg_send(msg_trade_alert(trade_snapshot))
+            record, recorded = record_trade_alert(trade_snapshot, source="check_now") if ok else (None, False)
+            notifications.append({
+                "sent": ok,
+                "recorded": recorded,
+                "timeframe": decision.get("execution_timeframe"),
+                "direction": decision.get("direction"),
+                "trade_record": record,
+                "trade_alert_key": alert_key,
+            })
+
+        sent_any = any(item["sent"] for item in notifications)
         return {
             **snapshot,
-            "notification_sent": ok,
-            "recorded": recorded,
-            "trade_record": record,
-            "trade_alert_key": alert_key,
+            "notification_sent": sent_any,
+            "notifications": notifications,
         }
+    decision = snapshot.get("final", {})
     return {
         **snapshot,
         "notification_sent": False,
