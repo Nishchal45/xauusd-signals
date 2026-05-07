@@ -2215,7 +2215,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box}body{margin:0;background:#0b0b09;color:#ece7dc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 main{max-width:1440px;margin:0 auto;padding:16px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:12px}
 h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.sub{font-size:12px;color:#9f9a8f;margin-top:4px}.stamp{font-size:12px;color:#9f9a8f;text-align:right}
-button,.navlink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,.navlink:hover{border-color:#b99036}
+button,.navlink,.tablink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,.navlink:hover,.tablink:hover{border-color:#b99036}
+.tabs-nav{display:flex;gap:8px;margin:12px 0}.tablink{margin-left:0}.tablink.active{background:#2a2518;border-color:#b99036;color:#f2c76b}
 .grid{display:grid;gap:10px}.hero{grid-template-columns:1.25fr .75fr}.four{grid-template-columns:repeat(4,1fr)}.three{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:repeat(2,1fr)}
 .panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.panel.tight{padding:10px}
 .label{font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.muted{color:#9f9a8f}.small{font-size:12px}.tiny{font-size:11px}.long{color:#4ecb71}.short{color:#ef6a5b}.wait{color:#d7a93f}.blue{color:#6bb7d7}.violet{color:#b999e6}
@@ -2238,8 +2239,9 @@ canvas{width:100%;height:92px;display:block;margin-top:8px}.tf-head{display:flex
     <div>
       <h1>AURUM Risk OS</h1>
       <div class="sub">XAU/USD intraday cockpit: live news search, scheduled event risk, public-web sentiment, 1H EMA regime, 15M liquidity sweep execution.</div>
+      <div class="tabs-nav"><a class="tablink active" href="/">Cockpit</a><a class="tablink" href="/trades">Journal</a></div>
     </div>
-    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/trades">Trade Journal</a></div>
+    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/trades">Journal</a></div>
   </div>
   <div id="app"><div class="panel">Loading market state...</div></div>
   <div class="foot">Research only, not financial advice. Free feeds can lag or fail; liquidity-sweep signals are rules-based approximations, not broker-grade order-flow data.</div>
@@ -2468,7 +2470,8 @@ TRADES_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box}body{margin:0;background:#0b0b09;color:#ece7dc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 main{max-width:1280px;margin:0 auto;padding:16px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:12px}
 h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.sub{font-size:12px;color:#9f9a8f;margin-top:4px}.stamp{font-size:12px;color:#9f9a8f;text-align:right}
-button,a.btn{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,a.btn:hover{border-color:#b99036}
+button,a.btn,.tablink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,a.btn:hover,.tablink:hover{border-color:#b99036}
+.tabs-nav{display:flex;gap:8px;margin:12px 0}.tablink{margin-left:0}.tablink.active{background:#2a2518;border-color:#b99036;color:#f2c76b}
 .panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.grid{display:grid;gap:10px}.four{grid-template-columns:repeat(4,1fr)}
 .metric{background:#10100c;border:1px solid #28251d;border-radius:7px;padding:10px}.metric span{display:block;font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.metric b{display:block;font-size:22px;margin-top:4px}
 table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #2c2a21;padding:8px 6px;vertical-align:top}th{color:#9f9a8f;font-size:10px;text-transform:uppercase;letter-spacing:.1em}tr:last-child td{border-bottom:0}
@@ -2483,6 +2486,7 @@ table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}th,td{t
     <div>
       <h1>XAU/USD Trade Journal</h1>
       <div class="sub">Executed alert record with TP/SL outcome tracking from observed 15M candle ranges.</div>
+      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink active" href="/trades">Journal</a></div>
     </div>
     <div class="stamp"><div id="status">loading...</div><button onclick="loadTrades(true)">Refresh</button><a class="btn" href="/">Cockpit</a></div>
   </div>
@@ -2534,8 +2538,8 @@ async function loadTrades(refresh=false){
     document.getElementById('app').innerHTML=`<span class="short">Trade journal error: ${esc(error.message)}</span>`;
   }
 }
-loadTrades(true);
-setInterval(()=>loadTrades(true),300000);
+loadTrades(false);
+setInterval(()=>loadTrades(false),300000);
 </script>
 </body>
 </html>"""
