@@ -39,36 +39,54 @@ import uvicorn, os, asyncio, httpx, logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger("xauusd")
 
-TG_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID",   "")
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def env_value(name: str, default: str = "") -> str:
+    raw = os.environ.get(name, default)
+    if raw is None:
+        return ""
+    value = str(raw)
+    cleaned = CONTROL_CHAR_RE.sub("", value).strip()
+    if cleaned != value:
+        log.warning(f"{name} contained hidden whitespace/control characters; using sanitized value.")
+    return cleaned
+
+
+def env_url(name: str, default: str = "") -> str:
+    return env_value(name, default).rstrip("/")
+
+
+TG_TOKEN   = env_value("TELEGRAM_BOT_TOKEN")
+TG_CHAT_ID = env_value("TELEGRAM_CHAT_ID")
+ADMIN_TOKEN = env_value("ADMIN_TOKEN")
 EMAIL_ENABLED = os.environ.get("EMAIL_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 EMAIL_BACKUP_MODE = os.environ.get("EMAIL_BACKUP_MODE", "failover").lower()
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_HOST = env_value("SMTP_HOST")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_USER = env_value("SMTP_USER")
+SMTP_PASSWORD = env_value("SMTP_PASSWORD")
 SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
 SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
-EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
-EMAIL_TO = os.environ.get("EMAIL_TO", "")
-APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+EMAIL_FROM = env_value("EMAIL_FROM", SMTP_USER)
+EMAIL_TO = env_value("EMAIL_TO")
+APP_BASE_URL = env_url("APP_BASE_URL", "http://localhost:8000")
+SUPABASE_URL = env_url("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = env_value("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ANON_KEY = env_value("SUPABASE_ANON_KEY")
 PAYMENTS_ENABLED = os.environ.get("PAYMENTS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+STRIPE_SECRET_KEY = env_value("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = env_value("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_ID = env_value("STRIPE_PRICE_ID")
 PRODUCT_ANALYTICS_ENABLED = os.environ.get("PRODUCT_ANALYTICS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY", "")
-POSTHOG_HOST = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").rstrip("/")
-OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
-OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
+POSTHOG_API_KEY = env_value("POSTHOG_API_KEY")
+POSTHOG_HOST = env_url("POSTHOG_HOST", "https://us.i.posthog.com")
+OANDA_API_KEY = env_value("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = env_value("OANDA_ACCOUNT_ID")
 OANDA_ENV = os.environ.get("OANDA_ENV", "practice").lower()
-OANDA_API_BASE_URL = os.environ.get("OANDA_API_BASE_URL", "").rstrip("/")
-OANDA_INSTRUMENT = os.environ.get("OANDA_INSTRUMENT", "XAU_USD")
-OANDA_GRANULARITIES = os.environ.get("OANDA_GRANULARITIES", "M1,M5,M15,H1")
+OANDA_API_BASE_URL = env_url("OANDA_API_BASE_URL")
+OANDA_INSTRUMENT = env_value("OANDA_INSTRUMENT", "XAU_USD")
+OANDA_GRANULARITIES = env_value("OANDA_GRANULARITIES", "M1,M5,M15,H1")
 OANDA_INGEST_ENABLED = os.environ.get("OANDA_INGEST_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 OANDA_INGEST_SECONDS = int(os.environ.get("OANDA_INGEST_SECONDS", "300"))
 MARKET_DATA_SOURCE = os.environ.get("MARKET_DATA_SOURCE", "auto").lower()
