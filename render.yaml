@@ -8,3 +8,89 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: APP_BASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: PAYMENTS_ENABLED
+        value: false
+      - key: PRODUCT_ANALYTICS_ENABLED
+        value: false
+      - key: OANDA_API_KEY
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
+      - key: OANDA_ENV
+        value: practice
+      - key: OANDA_INSTRUMENT
+        value: XAU_USD
+      - key: OANDA_GRANULARITIES
+        value: M1,M5,M15,H1
+      - key: OANDA_INGEST_ENABLED
+        value: false
+      - key: OANDA_INGEST_SECONDS
+        value: 300
+      - key: MARKET_DATA_SOURCE
+        value: auto
+      - key: SUPABASE_OHLCV_SOURCE
+        value: oanda
+      - key: SUPABASE_OHLCV_LIMIT
+        value: 5000
+      - key: MACRO_FEATURES_ENABLED
+        value: true
+      - key: MACRO_FEATURES_INGEST_SECONDS
+        value: 21600
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: EMAIL_ENABLED
+        value: false
+      - key: EMAIL_BACKUP_MODE
+        value: failover
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_USE_TLS
+        value: true
+      - key: SMTP_USE_SSL
+        value: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_TO
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: TRADE_CHECK_SECONDS
+        value: 900
+      - key: HARD_FILTERS_ENABLED
+        value: true
+      - key: RECENT_SIGNAL_COOLDOWN_MINUTES
+        value: 120
+      - key: MAX_SPREAD_CENTS
+        value: 30
+      - key: XAUUSD_SPREAD_CENTS
+        sync: false
+      - key: SIGNAL_VALID_MINUTES
+        value: 90
+      - key: SIGNAL_INVALIDATION_ATR_BUFFER
+        value: 0.20
+      - key: GO_LIVE_MIN_CLOSED_SIGNALS
+        value: 50
+      - key: GO_LIVE_MIN_WIN_RATE
+        value: 50
+      - key: GO_LIVE_MIN_AVG_R
+        value: 0.40
+      - key: GO_LIVE_MIN_PROFIT_FACTOR
+        value: 1.50
+      - key: GO_LIVE_MAX_LOSING_STREAK
+        value: 10
