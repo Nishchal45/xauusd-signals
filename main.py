@@ -48,13 +48,21 @@ def env_value(name: str, default: str = "") -> str:
         return ""
     value = str(raw)
     cleaned = CONTROL_CHAR_RE.sub("", value).strip()
+    if cleaned.startswith(f"{name}="):
+        cleaned = cleaned.split("=", 1)[1].strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1].strip()
     if cleaned != value:
         log.warning(f"{name} contained hidden whitespace/control characters; using sanitized value.")
     return cleaned
 
 
 def env_url(name: str, default: str = "") -> str:
-    return env_value(name, default).rstrip("/")
+    value = env_value(name, default).rstrip("/")
+    if value and not value.startswith(("http://", "https://")):
+        log.warning(f"{name} is missing a URL scheme; assuming https://.")
+        value = f"https://{value}"
+    return value
 
 
 TG_TOKEN   = env_value("TELEGRAM_BOT_TOKEN")
