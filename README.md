@@ -59,13 +59,31 @@ SMTP_USE_SSL=false
 EMAIL_FROM=
 EMAIL_TO=
 ADMIN_TOKEN=
-TRADE_CHECK_SECONDS=900
+TRADE_CHECK_SECONDS=300
+TRADE_STARTUP_DELAY_SECONDS=5
 HARD_FILTERS_ENABLED=true
-RECENT_SIGNAL_COOLDOWN_MINUTES=120
+RECENT_SIGNAL_COOLDOWN_MINUTES=60
 MAX_SPREAD_CENTS=30
 XAUUSD_SPREAD_CENTS=
 SIGNAL_VALID_MINUTES=90
 SIGNAL_INVALIDATION_ATR_BUFFER=0.20
+SIGNAL_CACHE_TTL_SECONDS=60
+WATCH_ALERTS_ENABLED=true
+WATCH_CHECK_SECONDS=300
+WATCH_STARTUP_DELAY_SECONDS=15
+WATCH_ALERT_COOLDOWN_MINUTES=30
+WATCH_MIN_CONDITIONS=4
+LIQUIDITY_SWEEP_SCAN_BARS_5M=12
+LIQUIDITY_SWEEP_SCAN_BARS_15M=6
+LIQUIDITY_SWEEP_SCAN_BARS_1H=3
+ORDER_BLOCK_IMPULSE_ATR=1.90
+ORDER_BLOCK_MIN_SCORE=55
+ORDER_BLOCK_TESTED_MIN_SCORE=55
+ORDER_BLOCK_TEST_TOLERANCE_ATR=0.30
+TECHNICAL_SIGNAL_THRESHOLD_5M=58
+TECHNICAL_SIGNAL_THRESHOLD_15M=62
+TECHNICAL_SIGNAL_THRESHOLD_1H=62
+STACK_H1_BIAS_MIN_SCORE=10
 GO_LIVE_MIN_CLOSED_SIGNALS=50
 GO_LIVE_MIN_WIN_RATE=50
 GO_LIVE_MIN_AVG_R=0.40
@@ -127,6 +145,20 @@ Executable alerts now require the full intraday stack:
 5. Phase 1 hard filters pass.
 
 Standalone `1H` or `15M` signals can still appear as context, but Telegram/Supabase executable alerts are only generated from the `15M_ORDER_BLOCK_5M_SWEEP` stack.
+
+The alerting path now has two tiers:
+
+- `TRADE`: recorded only when the full executable stack passes.
+- `WATCH`: Telegram/email heads-up when `15M` or `5M` has a technical trigger or at least `WATCH_MIN_CONDITIONS` forming conditions, but no trade is recorded yet.
+
+Signal frequency can be tuned without code changes through the sweep, order-block, technical-threshold, watch, and cooldown environment variables above. After changing these values, compare:
+
+```text
+GET /api/backtest/supabase-stack?token=ADMIN_TOKEN&days=30&max_checks=2000&include_filters=true
+GET /api/backtest/supabase-stack?token=ADMIN_TOKEN&days=30&max_checks=2000&include_filters=false
+```
+
+Use the `skipped` object to identify whether signal scarcity is coming from stack conditions or hard filters.
 
 ## Phase 4 OANDA Data Layer
 
@@ -378,3 +410,34 @@ The dashboard surfaces `Global catalysts` in the headline area and adds a `Globa
 - per-headline playbook text so the trader can manually override the model
 
 This only biases direction; executable alerts still require the 1H/15M/5M execution stack and hard filters to pass.
+
+## Phase 16 Prop Firm Trade Generator
+
+The cockpit now includes a prop-firm gate on top of the existing signal engine. It does not place broker trades. It converts the current executable XAU/USD setup into a rule-constrained candidate with exact account risk, XAU size, daily risk left, and blockers.
+
+Endpoint:
+
+```text
+GET /api/prop/trades?refresh=false
+```
+
+Default challenge settings:
+
+```bash
+PROP_MODE_ENABLED=true
+PROP_FIRM_NAME="Generic Prop Firm"
+PROP_ACCOUNT_SIZE=100000
+PROP_PROFIT_TARGET_PCT=10
+PROP_MAX_DAILY_LOSS_PCT=5
+PROP_MAX_TOTAL_DRAWDOWN_PCT=10
+PROP_RISK_PER_TRADE_PCT=0.50
+PROP_PROTECT_RISK_PER_TRADE_PCT=0.25
+PROP_MAX_DAILY_RISK_PCT=1.00
+PROP_MIN_RR=2.00
+PROP_MIN_CONFIDENCE=70
+PROP_MAX_TRADES_PER_DAY=3
+PROP_MAX_LOSSES_PER_DAY=2
+PROP_ALLOW_COUNTERTREND=false
+```
+
+Journal trades marked `TAKEN` are used to estimate challenge progress, same-day losses, and remaining daily risk. The prop panel will block trades when the full-stack signal is missing, hard filters fail, event risk is high, RR/confidence is too low, daily limits are reached, or protect-phase sizing requires risk reduction.

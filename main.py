@@ -14,7 +14,7 @@ HOW IT WORKS:
 ENVIRONMENT VARIABLES:
   TELEGRAM_BOT_TOKEN   → from @BotFather on Telegram
   TELEGRAM_CHAT_ID     → from @userinfobot on Telegram
-  TRADE_CHECK_SECONDS  → optional; default 900
+  TRADE_CHECK_SECONDS  → optional; default 300
   TRADE_LOG_PATH       → optional; default trade_history.json
 """
 
@@ -25,14 +25,17 @@ from contextlib import asynccontextmanager, suppress
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from html import escape
 from email.message import EmailMessage
+import copy
 import hashlib
 import json
 import hmac
 import re
 import smtplib
 import ssl
+import threading
 import xml.etree.ElementTree as ET
 import uvicorn, os, asyncio, httpx, logging
 
@@ -102,15 +105,79 @@ SUPABASE_OHLCV_SOURCE = os.environ.get("SUPABASE_OHLCV_SOURCE", "oanda")
 SUPABASE_OHLCV_LIMIT = int(os.environ.get("SUPABASE_OHLCV_LIMIT", "5000"))
 MACRO_FEATURES_ENABLED = os.environ.get("MACRO_FEATURES_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 MACRO_FEATURES_INGEST_SECONDS = int(os.environ.get("MACRO_FEATURES_INGEST_SECONDS", "21600"))
-TRADE_CHECK_SECONDS = int(os.environ.get("TRADE_CHECK_SECONDS", "900"))
+TRADE_CHECK_SECONDS = int(os.environ.get("TRADE_CHECK_SECONDS", "300"))
+TRADE_STARTUP_DELAY_SECONDS = int(os.environ.get("TRADE_STARTUP_DELAY_SECONDS", "5"))
 TRADE_LOG_PATH = os.environ.get("TRADE_LOG_PATH", "trade_history.json")
 HARD_FILTERS_ENABLED = os.environ.get("HARD_FILTERS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-RECENT_SIGNAL_COOLDOWN_MINUTES = int(os.environ.get("RECENT_SIGNAL_COOLDOWN_MINUTES", "120"))
+RECENT_SIGNAL_COOLDOWN_MINUTES = int(os.environ.get("RECENT_SIGNAL_COOLDOWN_MINUTES", "60"))
 MAX_SPREAD_CENTS = float(os.environ.get("MAX_SPREAD_CENTS", "30"))
 XAUUSD_SPREAD_CENTS = os.environ.get("XAUUSD_SPREAD_CENTS", "")
 SPREAD_CACHE_TTL_SECONDS = int(os.environ.get("SPREAD_CACHE_TTL_SECONDS", "60"))
 SIGNAL_VALID_MINUTES = int(os.environ.get("SIGNAL_VALID_MINUTES", "90"))
 SIGNAL_INVALIDATION_ATR_BUFFER = float(os.environ.get("SIGNAL_INVALIDATION_ATR_BUFFER", "0.20"))
+WATCH_ALERTS_ENABLED = os.environ.get("WATCH_ALERTS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+WATCH_CHECK_SECONDS = int(os.environ.get("WATCH_CHECK_SECONDS", str(TRADE_CHECK_SECONDS)))
+WATCH_STARTUP_DELAY_SECONDS = int(os.environ.get("WATCH_STARTUP_DELAY_SECONDS", "15"))
+WATCH_ALERT_COOLDOWN_MINUTES = int(os.environ.get("WATCH_ALERT_COOLDOWN_MINUTES", "30"))
+WATCH_MIN_CONDITIONS = int(os.environ.get("WATCH_MIN_CONDITIONS", "4"))
+LONDON_ALERTS_ENABLED = os.environ.get("LONDON_ALERTS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+LONDON_ALERT_CHECK_SECONDS = int(os.environ.get("LONDON_ALERT_CHECK_SECONDS", str(TRADE_CHECK_SECONDS)))
+LONDON_ALERT_STARTUP_DELAY_SECONDS = int(os.environ.get("LONDON_ALERT_STARTUP_DELAY_SECONDS", "20"))
+PROP_MODE_ENABLED = os.environ.get("PROP_MODE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+PROP_FIRM_NAME = env_value("PROP_FIRM_NAME", "Generic Prop Firm")
+PROP_ACCOUNT_SIZE = float(os.environ.get("PROP_ACCOUNT_SIZE", "100000"))
+PROP_PROFIT_TARGET_PCT = float(os.environ.get("PROP_PROFIT_TARGET_PCT", "10"))
+PROP_MAX_DAILY_LOSS_PCT = float(os.environ.get("PROP_MAX_DAILY_LOSS_PCT", "5"))
+PROP_MAX_TOTAL_DRAWDOWN_PCT = float(os.environ.get("PROP_MAX_TOTAL_DRAWDOWN_PCT", "10"))
+PROP_RISK_PER_TRADE_PCT = float(os.environ.get("PROP_RISK_PER_TRADE_PCT", "0.50"))
+PROP_PROTECT_RISK_PER_TRADE_PCT = float(os.environ.get("PROP_PROTECT_RISK_PER_TRADE_PCT", "0.25"))
+PROP_MAX_DAILY_RISK_PCT = float(os.environ.get("PROP_MAX_DAILY_RISK_PCT", "1.00"))
+PROP_MIN_RR = float(os.environ.get("PROP_MIN_RR", "2.00"))
+PROP_MIN_CONFIDENCE = int(os.environ.get("PROP_MIN_CONFIDENCE", "70"))
+PROP_MAX_TRADES_PER_DAY = int(os.environ.get("PROP_MAX_TRADES_PER_DAY", "3"))
+PROP_MAX_LOSSES_PER_DAY = int(os.environ.get("PROP_MAX_LOSSES_PER_DAY", "2"))
+PROP_ALLOW_COUNTERTREND = os.environ.get("PROP_ALLOW_COUNTERTREND", "false").lower() in {"1", "true", "yes", "on"}
+LIQUIDITY_SWEEP_SCAN_BARS_5M = int(os.environ.get("LIQUIDITY_SWEEP_SCAN_BARS_5M", "12"))
+LIQUIDITY_SWEEP_SCAN_BARS_15M = int(os.environ.get("LIQUIDITY_SWEEP_SCAN_BARS_15M", "6"))
+LIQUIDITY_SWEEP_SCAN_BARS_1H = int(os.environ.get("LIQUIDITY_SWEEP_SCAN_BARS_1H", "3"))
+ORDER_BLOCK_IMPULSE_ATR = float(os.environ.get("ORDER_BLOCK_IMPULSE_ATR", "1.90"))
+ORDER_BLOCK_MIN_SCORE = int(os.environ.get("ORDER_BLOCK_MIN_SCORE", "55"))
+ORDER_BLOCK_TESTED_MIN_SCORE = int(os.environ.get("ORDER_BLOCK_TESTED_MIN_SCORE", "55"))
+ORDER_BLOCK_TEST_TOLERANCE_ATR = float(os.environ.get("ORDER_BLOCK_TEST_TOLERANCE_ATR", "0.30"))
+TECHNICAL_SIGNAL_THRESHOLD_5M = int(os.environ.get("TECHNICAL_SIGNAL_THRESHOLD_5M", "58"))
+TECHNICAL_SIGNAL_THRESHOLD_15M = int(os.environ.get("TECHNICAL_SIGNAL_THRESHOLD_15M", "62"))
+TECHNICAL_SIGNAL_THRESHOLD_1H = int(os.environ.get("TECHNICAL_SIGNAL_THRESHOLD_1H", "62"))
+STACK_H1_BIAS_MIN_SCORE = int(os.environ.get("STACK_H1_BIAS_MIN_SCORE", "10"))
+FIB_EMA_LOOKBACK_BARS = int(os.environ.get("FIB_EMA_LOOKBACK_BARS", "192"))
+FIB_EMA_MIN_IMPULSE_ATR = float(os.environ.get("FIB_EMA_MIN_IMPULSE_ATR", "1.50"))
+FIB_EMA_ENTRY_TOLERANCE_ATR = float(os.environ.get("FIB_EMA_ENTRY_TOLERANCE_ATR", "0.15"))
+FIB_EMA_STOP_BUFFER_ATR = float(os.environ.get("FIB_EMA_STOP_BUFFER_ATR", "0.25"))
+ICT_LOOKBACK_M15_BARS = int(os.environ.get("ICT_LOOKBACK_M15_BARS", "96"))
+ICT_BOS_LOOKBACK_5M_BARS = int(os.environ.get("ICT_BOS_LOOKBACK_5M_BARS", "36"))
+ICT_MIN_IMPULSE_ATR = float(os.environ.get("ICT_MIN_IMPULSE_ATR", "1.20"))
+ICT_ZONE_TOUCH_TOLERANCE_ATR = float(os.environ.get("ICT_ZONE_TOUCH_TOLERANCE_ATR", "0.20"))
+ICT_STOP_BUFFER_ATR = float(os.environ.get("ICT_STOP_BUFFER_ATR", "0.20"))
+ICT_MIN_RR = float(os.environ.get("ICT_MIN_RR", "2.00"))
+ICT_MAX_TRADES_PER_DAY = int(os.environ.get("ICT_MAX_TRADES_PER_DAY", "3"))
+ICT_MAX_CONSECUTIVE_LOSSES = int(os.environ.get("ICT_MAX_CONSECUTIVE_LOSSES", "2"))
+ICT_DEFAULT_SESSIONS = {"LONDON_OPEN_CT", "NY_OPEN_OVERLAP_CT"}
+ICT_LONDON_ONLY_SESSIONS = {"LONDON_OPEN_CT"}
+MT5_AUTOTRADE_ENABLED = os.environ.get("MT5_AUTOTRADE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+MT5_MANUAL_EXECUTION_ENABLED = os.environ.get("MT5_MANUAL_EXECUTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+MT5_DEMO_MODE = os.environ.get("MT5_DEMO_MODE", "true").lower() in {"1", "true", "yes", "on"}
+MT5_SYMBOL = env_value("MT5_SYMBOL", "XAUUSD")
+MT5_LOGIN = env_value("MT5_LOGIN")
+MT5_PASSWORD = env_value("MT5_PASSWORD")
+MT5_SERVER = env_value("MT5_SERVER")
+MT5_TERMINAL_PATH = env_value("MT5_TERMINAL_PATH")
+MT5_RISK_PER_TRADE_PCT = float(os.environ.get("MT5_RISK_PER_TRADE_PCT", "1.0"))
+MT5_MAX_VOLUME = float(os.environ.get("MT5_MAX_VOLUME", "5.0"))
+MT5_DEVIATION_POINTS = int(os.environ.get("MT5_DEVIATION_POINTS", "20"))
+MT5_MAGIC = int(os.environ.get("MT5_MAGIC", "26060801"))
+MT5_CHECK_SECONDS = int(os.environ.get("MT5_CHECK_SECONDS", "60"))
+MT5_AUTO_STARTUP_DELAY_SECONDS = int(os.environ.get("MT5_AUTO_STARTUP_DELAY_SECONDS", "20"))
+MT5_MAX_ENTRY_DRIFT_USD = float(os.environ.get("MT5_MAX_ENTRY_DRIFT_USD", "2.50"))
+MT5_ORDER_COMMENT = env_value("MT5_ORDER_COMMENT", "AURUM London BOS")
 GO_LIVE_MIN_CLOSED_SIGNALS = int(os.environ.get("GO_LIVE_MIN_CLOSED_SIGNALS", "50"))
 GO_LIVE_MIN_WIN_RATE = float(os.environ.get("GO_LIVE_MIN_WIN_RATE", "50"))
 GO_LIVE_MIN_AVG_R = float(os.environ.get("GO_LIVE_MIN_AVG_R", "0.40"))
@@ -118,6 +185,18 @@ GO_LIVE_MIN_PROFIT_FACTOR = float(os.environ.get("GO_LIVE_MIN_PROFIT_FACTOR", "1
 GO_LIVE_MAX_LOSING_STREAK = int(os.environ.get("GO_LIVE_MAX_LOSING_STREAK", "10"))
 CONTEXT_TTL_SECONDS = int(os.environ.get("CONTEXT_TTL_SECONDS", "300"))
 CONTEXT_CACHE = {"ts": None, "data": None}
+CONTEXT_CACHE_LOCK = threading.Lock()
+SIGNAL_CACHE_TTL_SECONDS = int(os.environ.get("SIGNAL_CACHE_TTL_SECONDS", "60"))
+SIGNALS_CACHE = {"ts": None, "data": None}
+SIGNALS_CACHE_LOCK = threading.Lock()
+FIB_EMA_CACHE = {"ts": None, "data": None}
+FIB_EMA_CACHE_LOCK = threading.Lock()
+ICT_BOS_CACHE = {"ts": None, "data": None}
+ICT_BOS_CACHE_LOCK = threading.Lock()
+ICT_LONDON_BOS_CACHE = {"ts": None, "data": None}
+ICT_LONDON_BOS_CACHE_LOCK = threading.Lock()
+MT5_ORDER_LOCK = threading.Lock()
+MT5_LAST_ORDER_KEY = {"key": None, "ts": None, "ticket": None}
 SPREAD_CACHE = {"ts": None, "data": None}
 EVENT_STUDY_TTL_SECONDS = int(os.environ.get("EVENT_STUDY_TTL_SECONDS", "21600"))
 EVENT_STUDY_CACHE = {"ts": None, "data": None}
@@ -1009,9 +1088,20 @@ def fetch_oanda_data(interval: str) -> tuple[pd.DataFrame | None, str | None]:
     return df, None
 
 
+def prepare_yfinance_cache(yf) -> None:
+    cache_dir = os.environ.get("YFINANCE_CACHE_DIR", "/tmp/yfinance-cache")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        if hasattr(yf, "set_tz_cache_location"):
+            yf.set_tz_cache_location(cache_dir)
+    except Exception as e:
+        log.warning(f"yfinance cache setup skipped: {e}")
+
+
 def fetch_yfinance_data(interval: str) -> tuple[pd.DataFrame | None, str | None]:
     try:
         import yfinance as yf
+        prepare_yfinance_cache(yf)
         periods = {"1h": "60d", "15m": "30d", "5m": "30d"}
         period = periods.get(interval, "30d")
         min_bars = min_bars_for_interval(interval)
@@ -1107,6 +1197,20 @@ def safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def compact_error(error, limit: int = 160) -> str:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    reason = getattr(response, "reason_phrase", "")
+    if status_code:
+        return f"{status_code} {reason}".strip()
+
+    text = str(error).splitlines()[0].strip() or error.__class__.__name__
+    text = re.sub(r"https?://\S+", "<url>", text)
+    if len(text) > limit:
+        text = f"{text[:limit - 3].rstrip()}..."
+    return text
+
+
 def pct_change_now(series: pd.Series, idx: int, lookback: int) -> float:
     if idx < lookback:
         return 0.0
@@ -1153,13 +1257,13 @@ def empty_sweep(lookback: int) -> dict:
 def detect_liquidity_sweep(df: pd.DataFrame, at: pd.Series, interval: str) -> dict:
     if interval == "5m":
         lookback = 72
-        scan_bars = 9
+        scan_bars = LIQUIDITY_SWEEP_SCAN_BARS_5M
     elif interval == "15m":
         lookback = 48
-        scan_bars = 5
+        scan_bars = LIQUIDITY_SWEEP_SCAN_BARS_15M
     else:
         lookback = 30
-        scan_bars = 3
+        scan_bars = LIQUIDITY_SWEEP_SCAN_BARS_1H
     idx_now = len(df) - 1
     best = empty_sweep(lookback)
 
@@ -1242,7 +1346,7 @@ def empty_zone_context() -> dict:
     }
 
 
-def price_in_zone(price: float, zone: dict, atr_value: float, tolerance_atr: float = 0.20) -> bool:
+def price_in_zone(price: float, zone: dict, atr_value: float, tolerance_atr: float = ORDER_BLOCK_TEST_TOLERANCE_ATR) -> bool:
     tolerance = max(atr_value * tolerance_atr, price * 0.00005)
     return safe_float(zone.get("low")) - tolerance <= price <= safe_float(zone.get("high")) + tolerance
 
@@ -1340,10 +1444,10 @@ def detect_order_block_zones(df: pd.DataFrame, at: pd.Series, interval: str) -> 
         direction = None
         displacement = 0.0
 
-        if close < open_price and impulse_up >= 2.2:
+        if close < open_price and impulse_up >= ORDER_BLOCK_IMPULSE_ATR:
             direction = "LONG"
             displacement = impulse_up
-        elif close > open_price and impulse_down >= 2.2:
+        elif close > open_price and impulse_down >= ORDER_BLOCK_IMPULSE_ATR:
             direction = "SHORT"
             displacement = impulse_down
         if not direction:
@@ -1378,7 +1482,7 @@ def detect_order_block_zones(df: pd.DataFrame, at: pd.Series, interval: str) -> 
             - min(16, distance_atr * 4)
         )
         score = int(round(clamp(score, 0, 100)))
-        if score < 55:
+        if score < ORDER_BLOCK_MIN_SCORE:
             continue
 
         zones.append({
@@ -1401,7 +1505,7 @@ def detect_order_block_zones(df: pd.DataFrame, at: pd.Series, interval: str) -> 
         })
 
     zones = sorted(zones, key=lambda item: (item["tested"], item["score"], -item["distance_atr"]), reverse=True)[:8]
-    tested_zones = [zone for zone in zones if zone["tested"] and zone["score"] >= 58]
+    tested_zones = [zone for zone in zones if zone["tested"] and zone["score"] >= ORDER_BLOCK_TESTED_MIN_SCORE]
     tested_zone = max(tested_zones, key=lambda item: item["score"]) if tested_zones else None
     liquidity_pools = detect_liquidity_pools(df, at)
     session_levels = detect_session_levels(df)
@@ -1603,14 +1707,18 @@ def compute_signal(df: pd.DataFrame, interval: str) -> dict:
     ))
     setup_direction = "LONG" if technical_score > 15 else "SHORT" if technical_score < -15 else "NONE"
     if interval in ("15m", "5m"):
-        execution_threshold = 65 if interval == "15m" else 60
+        execution_threshold = TECHNICAL_SIGNAL_THRESHOLD_15M if interval == "15m" else TECHNICAL_SIGNAL_THRESHOLD_5M
         signal = "LONG" if (
             technical_score >= execution_threshold and sweep["direction"] == "LONG" and sweep["confirmed"]
         ) else "SHORT" if (
             technical_score <= -execution_threshold and sweep["direction"] == "SHORT" and sweep["confirmed"]
         ) else "WAIT"
     else:
-        signal = "LONG" if technical_score >= 62 else "SHORT" if technical_score <= -62 else "WAIT"
+        signal = (
+            "LONG" if technical_score >= TECHNICAL_SIGNAL_THRESHOLD_1H
+            else "SHORT" if technical_score <= -TECHNICAL_SIGNAL_THRESHOLD_1H
+            else "WAIT"
+        )
 
     trade_direction = setup_direction if sweep["confirmed"] and sweep["direction"] == setup_direction else "NONE"
     trade = build_trade_plan(price, atrv, trade_direction, sweep)
@@ -1707,18 +1815,44 @@ def get_signal(interval: str = "1h") -> dict:
     return signal
 
 
-def get_both_signals() -> dict:
-    s1h  = get_signal("1h")
-    s15m = get_signal("15m")
-    s5m = get_signal("5m")
-    price = s5m.get("price") or s15m.get("price") or s1h.get("price") or 0
-    return {
-        "h1":        s1h,
-        "m15":       s15m,
-        "m5":        s5m,
-        "price":     price,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-    }
+def get_both_signals(force: bool = False) -> dict:
+    now = datetime.now(timezone.utc)
+    cached_at = SIGNALS_CACHE.get("ts")
+    if (
+        not force
+        and SIGNAL_CACHE_TTL_SECONDS > 0
+        and SIGNALS_CACHE.get("data") is not None
+        and cached_at is not None
+        and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+    ):
+        return copy.deepcopy(SIGNALS_CACHE["data"])
+
+    with SIGNALS_CACHE_LOCK:
+        now = datetime.now(timezone.utc)
+        cached_at = SIGNALS_CACHE.get("ts")
+        if (
+            not force
+            and SIGNAL_CACHE_TTL_SECONDS > 0
+            and SIGNALS_CACHE.get("data") is not None
+            and cached_at is not None
+            and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+        ):
+            return copy.deepcopy(SIGNALS_CACHE["data"])
+
+        s1h  = get_signal("1h")
+        s15m = get_signal("15m")
+        s5m = get_signal("5m")
+        price = s5m.get("price") or s15m.get("price") or s1h.get("price") or 0
+        data = {
+            "h1":        s1h,
+            "m15":       s15m,
+            "m5":        s5m,
+            "price":     price,
+            "timestamp": now.strftime("%Y-%m-%d %H:%M UTC"),
+        }
+        SIGNALS_CACHE["ts"] = now
+        SIGNALS_CACHE["data"] = copy.deepcopy(data)
+        return data
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1731,6 +1865,7 @@ def clamp(v, lo, hi):
 def macro_point(symbol: str, label: str, bullish_when_down: bool, unit: str = "") -> dict:
     try:
         import yfinance as yf
+        prepare_yfinance_cache(yf)
         df = yf.download(symbol, period="10d", interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty:
@@ -1773,7 +1908,7 @@ def macro_point(symbol: str, label: str, bullish_when_down: bool, unit: str = ""
             "change_pct": None,
             "move": "NA",
             "score": 0,
-            "status": f"offline: {e}",
+            "status": f"offline: {compact_error(e)}",
         }
 
 
@@ -2075,7 +2210,7 @@ def get_trade_catalyst_context() -> dict:
             "reason": reason,
         }
     except Exception as e:
-        return trade_catalyst_offline(f"offline: {e}")
+        return trade_catalyst_offline(f"offline: {compact_error(e)}")
 
 
 def merge_trade_catalyst_into_news(news: dict, catalyst: dict) -> dict:
@@ -2409,7 +2544,7 @@ def get_global_catalyst_context() -> dict:
             "assessment": assessment,
         }
     except Exception as e:
-        return global_catalysts_offline(f"offline: {e}")
+        return global_catalysts_offline(f"offline: {compact_error(e)}")
 
 
 def merge_global_catalysts_into_news(news: dict, catalysts: dict) -> dict:
@@ -2440,7 +2575,30 @@ def merge_global_catalysts_into_news(news: dict, catalysts: dict) -> dict:
         seen_titles.add(title_key)
         headlines.append(item)
     merged["headlines"] = headlines[:10]
+    merged.update(headline_bias_distribution(merged["headlines"]))
     return merged
+
+
+def headline_bias_distribution(headlines: list[dict]) -> dict:
+    bulls = bears = neutral = 0
+    for item in headlines:
+        bias = str(item.get("gold_bias") or item.get("bias") or "").lower()
+        score = safe_float(item.get("gold_score"))
+        if "bull" in bias or score > 0:
+            bulls += 1
+        elif "bear" in bias or score < 0:
+            bears += 1
+        else:
+            neutral += 1
+    total = max(1, bulls + bears + neutral)
+    return {
+        "bullish_count": bulls,
+        "bearish_count": bears,
+        "neutral_count": neutral,
+        "bullish_pct": round(bulls / total * 100, 1),
+        "bearish_pct": round(bears / total * 100, 1),
+        "neutral_pct": round(neutral / total * 100, 1),
+    }
 
 
 def get_news_context() -> dict:
@@ -2490,11 +2648,12 @@ def get_news_context() -> dict:
             "risk_count": risk_count,
             "impact_points": impact_points,
             "headlines": headlines[:8],
+            **headline_bias_distribution(headlines[:8]),
             "status": "ok",
             "source": "GDELT 12h",
         }
     except Exception as e:
-        fallback = get_fed_rss_context(str(e))
+        fallback = get_fed_rss_context(compact_error(e))
         if fallback["status"] == "ok":
             return fallback
         return {
@@ -2503,7 +2662,8 @@ def get_news_context() -> dict:
             "risk": "UNKNOWN",
             "risk_count": 0,
             "headlines": [],
-            "status": f"offline: {e}",
+            **headline_bias_distribution([]),
+            "status": f"offline: {compact_error(e)}",
             "source": "GDELT 12h",
         }
 
@@ -2549,6 +2709,7 @@ def get_fed_rss_context(reason: str = "") -> dict:
             "risk": risk,
             "risk_count": risk_count,
             "headlines": headlines[:5],
+            **headline_bias_distribution(headlines[:5]),
             "status": "ok",
             "source": "Fed RSS fallback",
             "fallback_reason": reason,
@@ -2560,7 +2721,8 @@ def get_fed_rss_context(reason: str = "") -> dict:
             "risk": "UNKNOWN",
             "risk_count": 0,
             "headlines": [],
-            "status": f"offline: {e}",
+            **headline_bias_distribution([]),
+            "status": f"offline: {compact_error(e)}",
             "source": "Fed RSS fallback",
             "fallback_reason": reason,
         }
@@ -2615,6 +2777,7 @@ def get_people_sentiment() -> dict:
             "neutral_count": neutral,
             "bullish_pct": round(bulls / total * 100, 1),
             "bearish_pct": round(bears / total * 100, 1),
+            "neutral_pct": round(neutral / total * 100, 1),
             "samples": samples[:5],
             "source": "GDELT public-web sentiment 24h",
             "status": "ok",
@@ -2628,9 +2791,10 @@ def get_people_sentiment() -> dict:
             "neutral_count": 0,
             "bullish_pct": 0,
             "bearish_pct": 0,
+            "neutral_pct": 0,
             "samples": [],
             "source": "GDELT public-web sentiment 24h",
-            "status": f"offline: {e}",
+            "status": f"offline: {compact_error(e)}",
         }
 
 
@@ -2651,6 +2815,7 @@ def derive_people_sentiment_from_news(news: dict, reason: str = "") -> dict:
         "neutral_count": neutral,
         "bullish_pct": round(bulls / total * 100, 1),
         "bearish_pct": round(bears / total * 100, 1),
+        "neutral_pct": round(neutral / total * 100, 1),
         "samples": headlines[:5],
         "source": "Derived from current GDELT headline tape",
         "status": f"fallback: {reason}" if reason else "fallback",
@@ -2848,7 +3013,7 @@ def get_event_study() -> dict:
         }
     except Exception as e:
         result = {
-            "status": f"offline: {e}",
+            "status": f"offline: {compact_error(e)}",
             "symbol": "GC=F",
             "timeframe": "1h",
             "events": [],
@@ -2874,41 +3039,49 @@ def get_market_context(force: bool = False) -> dict:
         if age < CONTEXT_TTL_SECONDS:
             return CONTEXT_CACHE["data"]
 
-    macro = get_macro_context()
-    news = get_news_context()
-    global_catalysts = get_global_catalyst_context()
-    news = merge_global_catalysts_into_news(news, global_catalysts)
-    people = get_people_sentiment()
-    if str(people.get("status", "")).startswith("offline") and news.get("headlines"):
-        people = derive_people_sentiment_from_news(news, people.get("status", ""))
-    event_risk = get_event_risk(now)
-    score = int(clamp(macro["score"] + news["score"] + people["score"], -8, 8))
-    bias = "BULLISH" if score >= 3 else "BEARISH" if score <= -3 else "NEUTRAL"
-    risk_rank = {"LOW": 0, "WATCH": 1, "UNKNOWN": 1, "MEDIUM": 2, "HIGH": 3}
-    news_risk = news.get("risk", "UNKNOWN")
-    event_level = event_risk.get("level", "LOW")
-    risk = news_risk if risk_rank.get(news_risk, 1) >= risk_rank.get(event_level, 0) else event_level
-    catalyst_note = (
-        f" · global catalysts {global_catalysts.get('bias')}"
-        if global_catalysts.get("active") else
-        ""
-    )
-    context = {
-        "score": score,
-        "bias": bias,
-        "risk": risk,
-        "macro": macro,
-        "news": news,
-        "global_catalysts": global_catalysts,
-        "trade_catalyst": global_catalysts,
-        "people": people,
-        "event_risk": event_risk,
-        "timestamp": now.strftime("%Y-%m-%d %H:%M UTC"),
-        "summary": f"{bias} bias · score {score:+d} · risk {risk}{catalyst_note} · refreshed from live feeds",
-    }
-    CONTEXT_CACHE["ts"] = now
-    CONTEXT_CACHE["data"] = context
-    return context
+    with CONTEXT_CACHE_LOCK:
+        now = datetime.now(timezone.utc)
+        cached_ts = CONTEXT_CACHE["ts"]
+        if not force and cached_ts and CONTEXT_CACHE["data"]:
+            age = (now - cached_ts).total_seconds()
+            if age < CONTEXT_TTL_SECONDS:
+                return CONTEXT_CACHE["data"]
+
+        macro = get_macro_context()
+        news = get_news_context()
+        global_catalysts = get_global_catalyst_context()
+        news = merge_global_catalysts_into_news(news, global_catalysts)
+        people = get_people_sentiment()
+        if str(people.get("status", "")).startswith("offline") and news.get("headlines"):
+            people = derive_people_sentiment_from_news(news, people.get("status", ""))
+        event_risk = get_event_risk(now)
+        score = int(clamp(macro["score"] + news["score"] + people["score"], -8, 8))
+        bias = "BULLISH" if score >= 3 else "BEARISH" if score <= -3 else "NEUTRAL"
+        risk_rank = {"LOW": 0, "WATCH": 1, "UNKNOWN": 1, "MEDIUM": 2, "HIGH": 3}
+        news_risk = news.get("risk", "UNKNOWN")
+        event_level = event_risk.get("level", "LOW")
+        risk = news_risk if risk_rank.get(news_risk, 1) >= risk_rank.get(event_level, 0) else event_level
+        catalyst_note = (
+            f" · global catalysts {global_catalysts.get('bias')}"
+            if global_catalysts.get("active") else
+            ""
+        )
+        context = {
+            "score": score,
+            "bias": bias,
+            "risk": risk,
+            "macro": macro,
+            "news": news,
+            "global_catalysts": global_catalysts,
+            "trade_catalyst": global_catalysts,
+            "people": people,
+            "event_risk": event_risk,
+            "timestamp": now.strftime("%Y-%m-%d %H:%M UTC"),
+            "summary": f"{bias} bias · score {score:+d} · risk {risk}{catalyst_note} · refreshed from live feeds",
+        }
+        CONTEXT_CACHE["ts"] = now
+        CONTEXT_CACHE["data"] = context
+        return context
 
 
 def normalized_score(value: float, max_abs: float) -> int:
@@ -3008,7 +3181,7 @@ def stacked_execution_setup(data: dict, context: dict | None = None) -> dict:
     h1_score = int(safe_float(h1.get("technical_score")))
     m15_score = int(safe_float(m15.get("technical_score")))
     m5_score = int(safe_float(m5.get("technical_score")))
-    h1_bias = direction_from_score(h1_score, 10, -10)
+    h1_bias = direction_from_score(h1_score, STACK_H1_BIAS_MIN_SCORE, -STACK_H1_BIAS_MIN_SCORE)
     zone_context = m15.get("zone_context") or empty_zone_context()
     zone = zone_context.get("tested_zone")
     sweep = m5.get("liquidity_sweep", {})
@@ -3034,7 +3207,7 @@ def stacked_execution_setup(data: dict, context: dict | None = None) -> dict:
         rsi_ok = False
         m15_ok = False
 
-    zone_ok = bool(zone and zone.get("direction") == direction and zone.get("score", 0) >= 58)
+    zone_ok = bool(zone and zone.get("direction") == direction and zone.get("score", 0) >= ORDER_BLOCK_TESTED_MIN_SCORE)
     h1_ok = h1_bias == direction
     sweep_ok = direction in ("LONG", "SHORT") and bool(sweep.get("confirmed"))
     evaluation_time = snapshot_time(data)
@@ -3619,6 +3792,313 @@ def timeframe_trade_decisions(snapshot: dict) -> list[dict]:
     return decisions
 
 
+def prop_firm_rules() -> dict:
+    account_size = max(PROP_ACCOUNT_SIZE, 1.0)
+    return {
+        "enabled": PROP_MODE_ENABLED,
+        "firm_name": PROP_FIRM_NAME,
+        "account_size": round(account_size, 2),
+        "profit_target_pct": PROP_PROFIT_TARGET_PCT,
+        "profit_target_usd": round(account_size * PROP_PROFIT_TARGET_PCT / 100, 2),
+        "max_daily_loss_pct": PROP_MAX_DAILY_LOSS_PCT,
+        "max_daily_loss_usd": round(account_size * PROP_MAX_DAILY_LOSS_PCT / 100, 2),
+        "max_total_drawdown_pct": PROP_MAX_TOTAL_DRAWDOWN_PCT,
+        "max_total_drawdown_usd": round(account_size * PROP_MAX_TOTAL_DRAWDOWN_PCT / 100, 2),
+        "base_risk_pct": PROP_RISK_PER_TRADE_PCT,
+        "protect_risk_pct": PROP_PROTECT_RISK_PER_TRADE_PCT,
+        "max_daily_risk_pct": PROP_MAX_DAILY_RISK_PCT,
+        "max_daily_risk_usd": round(account_size * PROP_MAX_DAILY_RISK_PCT / 100, 2),
+        "min_rr": PROP_MIN_RR,
+        "min_confidence": PROP_MIN_CONFIDENCE,
+        "max_trades_per_day": PROP_MAX_TRADES_PER_DAY,
+        "max_losses_per_day": PROP_MAX_LOSSES_PER_DAY,
+        "allow_countertrend": PROP_ALLOW_COUNTERTREND,
+    }
+
+
+def prop_counted_trades() -> list[dict]:
+    return [
+        trade for trade in load_trade_history().get("trades", [])
+        if str(trade.get("user_action") or "").upper() == "TAKEN"
+    ]
+
+
+def prop_account_state(rules: dict) -> dict:
+    trades = prop_counted_trades()
+    closed = [
+        trade for trade in trades
+        if trade.get("status") == "CLOSED" and trade.get("r_multiple") is not None
+    ]
+    today = datetime.now(timezone.utc).date()
+    today_trades = [trade for trade in trades if trade_time_value(trade).date() == today]
+    today_closed = [
+        trade for trade in today_trades
+        if trade.get("status") == "CLOSED" and trade.get("r_multiple") is not None
+    ]
+    today_losses = [trade for trade in today_closed if safe_float(trade.get("r_multiple")) < 0]
+    open_trades = [trade for trade in trades if trade.get("status") == "OPEN"]
+
+    risk_unit_usd = rules["account_size"] * rules["base_risk_pct"] / 100
+    net_r = sum(safe_float(trade.get("r_multiple")) for trade in closed)
+    today_r = sum(safe_float(trade.get("r_multiple")) for trade in today_closed)
+    realized_pnl_usd = net_r * risk_unit_usd
+    today_pnl_usd = today_r * risk_unit_usd
+    target_remaining_usd = max(0.0, rules["profit_target_usd"] - realized_pnl_usd)
+    target_progress_pct = (
+        clamp(realized_pnl_usd / rules["profit_target_usd"] * 100, -100, 150)
+        if rules["profit_target_usd"] else 0
+    )
+    account_pnl_pct = realized_pnl_usd / rules["account_size"] * 100
+    daily_loss_used_usd = max(0.0, -today_pnl_usd)
+    daily_risk_left_usd = max(0.0, rules["max_daily_risk_usd"] - daily_loss_used_usd)
+
+    if target_remaining_usd <= 0:
+        phase = "TARGET_REACHED"
+        phase_risk_pct = 0.0
+    elif target_progress_pct >= 75:
+        phase = "PROTECT"
+        phase_risk_pct = min(rules["base_risk_pct"], rules["protect_risk_pct"])
+    elif account_pnl_pct <= -1:
+        phase = "DEFENSIVE"
+        phase_risk_pct = min(rules["base_risk_pct"], rules["protect_risk_pct"])
+    elif account_pnl_pct >= 2:
+        phase = "PUSH"
+        phase_risk_pct = rules["base_risk_pct"]
+    else:
+        phase = "BUILD_CUSHION"
+        phase_risk_pct = rules["base_risk_pct"]
+
+    return {
+        "source": "local trade history marked TAKEN",
+        "phase": phase,
+        "phase_risk_pct": round(phase_risk_pct, 3),
+        "risk_unit_usd": round(risk_unit_usd, 2),
+        "counted_trades": len(trades),
+        "closed_trades": len(closed),
+        "open_trades": len(open_trades),
+        "trades_today": len(today_trades),
+        "closed_today": len(today_closed),
+        "losses_today": len(today_losses),
+        "net_r": round(net_r, 2),
+        "today_r": round(today_r, 2),
+        "realized_pnl_usd": round(realized_pnl_usd, 2),
+        "today_pnl_usd": round(today_pnl_usd, 2),
+        "daily_loss_used_usd": round(daily_loss_used_usd, 2),
+        "daily_risk_left_usd": round(daily_risk_left_usd, 2),
+        "target_remaining_usd": round(target_remaining_usd, 2),
+        "target_progress_pct": round(target_progress_pct, 1),
+        "account_pnl_pct": round(account_pnl_pct, 2),
+        "note": "Mark executed Journal trades as TAKEN so challenge progress and daily limits stay accurate.",
+    }
+
+
+def prop_effective_risk_pct(state: dict, rules: dict, context: dict) -> float:
+    risk_pct = safe_float(state.get("phase_risk_pct"))
+    if context.get("risk") == "MEDIUM":
+        risk_pct = min(risk_pct, rules["protect_risk_pct"])
+    daily_left_pct = state.get("daily_risk_left_usd", 0) / max(rules["account_size"], 1e-9) * 100
+    return round(max(0.0, min(risk_pct, daily_left_pct)), 3)
+
+
+def prop_trade_sizing(trade: dict, risk_pct: float, rules: dict) -> dict:
+    entry = safe_float(trade.get("entry"))
+    stop = safe_float(trade.get("stop"))
+    target = safe_float(trade.get("target"))
+    target_2 = trade.get("target_2")
+    stop_distance = abs(entry - stop)
+    risk_usd = rules["account_size"] * risk_pct / 100
+    size_oz = risk_usd / max(stop_distance, 1e-9) if stop_distance else 0.0
+    reward_usd = abs(target - entry) * size_oz if target else 0.0
+    target_2_reward_usd = abs(safe_float(target_2) - entry) * size_oz if target_2 is not None else None
+    return {
+        "risk_pct": round(risk_pct, 3),
+        "risk_usd": round(risk_usd, 2),
+        "size_oz": round(size_oz, 4),
+        "stop_distance": round(stop_distance, 2),
+        "target_profit_usd": round(reward_usd, 2),
+        "target_2_profit_usd": round(target_2_reward_usd, 2) if target_2_reward_usd is not None else None,
+        "position_note": "XAUUSD sizing assumes 1 oz P/L changes by $1 per $1 move in gold.",
+    }
+
+
+def prop_trade_candidate(snapshot: dict, rules: dict, state: dict) -> dict:
+    final = snapshot.get("final", {})
+    context = snapshot.get("context", {})
+    trade = final.get("trade", {}) or {}
+    hard_filters = final.get("hard_filters") or snapshot.get("hard_filters") or {}
+    risk_pct = prop_effective_risk_pct(state, rules, context)
+    sizing = prop_trade_sizing(trade, risk_pct, rules)
+    blockers = []
+
+    if not rules["enabled"]:
+        blockers.append("Prop mode is disabled.")
+    if not is_executable_trade(final):
+        blockers.append("No executable full-stack trade is active.")
+    if state.get("target_remaining_usd", 0) <= 0:
+        blockers.append("Profit target is reached; stop trading and request review/payout.")
+    if hard_filters and not hard_filters.get("allowed", True):
+        blockers.extend(hard_filters.get("blocked_reasons") or ["Hard filter is blocking execution."])
+    if context.get("risk") == "HIGH":
+        blockers.append("High-impact event risk is active.")
+    if final.get("quality") == "COUNTERTREND" and not rules["allow_countertrend"]:
+        blockers.append("Countertrend setups are disabled for prop challenge mode.")
+    if int(safe_float(final.get("confidence"))) < rules["min_confidence"]:
+        blockers.append(f"Confidence below prop threshold {rules['min_confidence']}%.")
+    if safe_float(trade.get("rr")) < rules["min_rr"]:
+        blockers.append(f"Risk/reward below required {rules['min_rr']:.2f}R.")
+    if state.get("trades_today", 0) >= rules["max_trades_per_day"]:
+        blockers.append(f"Max trades per day reached: {rules['max_trades_per_day']}.")
+    if state.get("losses_today", 0) >= rules["max_losses_per_day"]:
+        blockers.append(f"Max losing trades per day reached: {rules['max_losses_per_day']}.")
+    if state.get("daily_loss_used_usd", 0) >= rules["max_daily_risk_usd"]:
+        blockers.append("Self-imposed daily risk stop is reached.")
+    if sizing["risk_usd"] <= 0:
+        blockers.append("No daily risk budget left.")
+
+    target_remaining = safe_float(state.get("target_remaining_usd"))
+    r_to_target = target_remaining / max(sizing["risk_usd"], 1e-9) if sizing["risk_usd"] > 0 else None
+    ready = not blockers
+    return {
+        "status": "TRADE_READY" if ready else "WAIT",
+        "ready": ready,
+        "action": "BUY" if final.get("direction") == "LONG" and ready else "SELL" if final.get("direction") == "SHORT" and ready else "NO_TRADE",
+        "direction": final.get("direction"),
+        "quality": final.get("quality"),
+        "confidence": final.get("confidence"),
+        "execution_timeframe": final.get("execution_timeframe"),
+        "entry": trade.get("entry"),
+        "entry_low": trade.get("entry_low"),
+        "entry_high": trade.get("entry_high"),
+        "stop": trade.get("stop"),
+        "target": trade.get("target"),
+        "target_2": trade.get("target_2"),
+        "rr": trade.get("rr"),
+        "sizing": sizing,
+        "blockers": blockers,
+        "pass_math": {
+            "target_remaining_usd": round(target_remaining, 2),
+            "r_to_target": round(r_to_target, 2) if r_to_target is not None else None,
+            "two_r_wins_to_target": int(np.ceil(target_remaining / max(sizing["target_profit_usd"], 1e-9))) if sizing["target_profit_usd"] > 0 else None,
+            "daily_risk_left_usd": state.get("daily_risk_left_usd"),
+        },
+        "reason": final.get("reason"),
+        "disclaimer": "Research signal only. Confirm your prop firm rules before execution.",
+    }
+
+
+def prop_firm_snapshot(snapshot: dict) -> dict:
+    rules = prop_firm_rules()
+    state = prop_account_state(rules)
+    candidate = prop_trade_candidate(snapshot, rules, state)
+    return {
+        "rules": rules,
+        "state": state,
+        "candidate": candidate,
+        "guards": [
+            f"Risk {rules['base_risk_pct']}% max per A+ trade; protect phase risk {rules['protect_risk_pct']}%.",
+            f"Stop after {rules['max_losses_per_day']} losses or {rules['max_trades_per_day']} trades in a day.",
+            f"Only execute trades with at least {rules['min_rr']:.2f}R and confidence >= {rules['min_confidence']}%.",
+            "Do not trade high-impact news windows or blocked hard-filter states.",
+        ],
+    }
+
+
+def watch_signal_candidates(snapshot: dict) -> list[dict]:
+    if not WATCH_ALERTS_ENABLED:
+        return []
+
+    context = snapshot.get("context", {})
+    final = snapshot.get("final", {})
+    stacked = final.get("stacked_setup") or stacked_execution_setup(snapshot, context)
+    candidates = []
+
+    for key, tf in (("m15", "15M"), ("m5", "5M")):
+        signal_data = snapshot.get(key, {})
+        if signal_data.get("error"):
+            continue
+
+        signal = signal_data.get("signal")
+        setup_direction = signal_data.get("setup_direction")
+        conditions_met = int(safe_float(signal_data.get("conditions_met")))
+        direction = None
+        quality = None
+        reason = None
+
+        if signal in ("LONG", "SHORT"):
+            direction = signal
+            quality = "WATCH_TRIGGER"
+            reason = f"{tf} technical trigger exists, but full execution stack is not complete."
+        elif conditions_met >= WATCH_MIN_CONDITIONS and setup_direction in ("LONG", "SHORT"):
+            direction = setup_direction
+            quality = "WATCH_FORMING"
+            reason = f"{tf} setup is forming with {conditions_met}/{signal_data.get('max_conditions', 7)} conditions met."
+
+        if direction not in ("LONG", "SHORT"):
+            continue
+
+        sweep = signal_data.get("liquidity_sweep", {})
+        zone_context = signal_data.get("zone_context") or {}
+        zone = zone_context.get("tested_zone")
+        decision_stub = {
+            "direction": direction,
+            "quality": quality,
+            "execution_timeframe": tf,
+            "sweep": sweep,
+            "trade": signal_data.get("trade", {}),
+        }
+        filter_status = hard_filter_status(snapshot, decision_stub)
+
+        if stacked.get("executable") and stacked.get("direction") == direction:
+            if filter_status.get("allowed"):
+                continue
+            if tf != "5M":
+                continue
+            quality = "WATCH_BLOCKED"
+            reason = "Full stack is present, but a hard filter is blocking trade execution."
+
+        failed_checks = stacked.get("failed_checks") or []
+        candidates.append({
+            "timeframe": tf,
+            "direction": direction,
+            "quality": quality,
+            "bar_time": signal_data.get("bar_time"),
+            "price": signal_data.get("price"),
+            "technical_score": signal_data.get("technical_score"),
+            "conditions_met": conditions_met,
+            "max_conditions": signal_data.get("max_conditions", 7),
+            "conditions": signal_data.get("conditions", {}),
+            "trade": signal_data.get("trade", {}),
+            "stop": signal_data.get("stop"),
+            "target": signal_data.get("target"),
+            "liquidity_sweep": sweep,
+            "zone": zone,
+            "zone_context": zone_context,
+            "failed_stack_checks": failed_checks,
+            "hard_filters": filter_status,
+            "reason": reason,
+        })
+
+    return candidates
+
+
+def watch_alert_key(candidate: dict) -> str:
+    return ":".join([
+        "WATCH",
+        str(candidate.get("quality") or "UNKNOWN"),
+        str(candidate.get("timeframe") or "TF"),
+        str(candidate.get("direction") or "NONE"),
+        str(candidate.get("bar_time") or "NO_BAR"),
+    ])
+
+
+def watch_alert_bucket(candidate: dict) -> tuple:
+    return (
+        candidate.get("quality"),
+        candidate.get("timeframe"),
+        candidate.get("direction"),
+    )
+
+
 def grid_level_plan(price: float, direction: str, step: float, atr_value: float, anchor: float, account_risk: float = 10_000) -> dict:
     max_levels = 3
     per_level_risk_usd = account_risk * 0.0025
@@ -3814,6 +4294,1750 @@ def trend_grid_bot_signal(data: dict, context: dict) -> dict:
     }
 
 
+def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    work = df.copy()
+    if work.index.tz is None:
+        work.index = work.index.tz_localize("UTC")
+    else:
+        work.index = work.index.tz_convert("UTC")
+    aggregation = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+    }
+    if "volume" in work.columns:
+        aggregation["volume"] = "sum"
+    return work.resample(rule, label="right", closed="right").agg(aggregation).dropna()
+
+
+def ema_alignment_snapshot(df: pd.DataFrame, label: str) -> dict:
+    if df is None or len(df) < 205:
+        return {
+            "timeframe": label,
+            "available": False,
+            "direction": "NONE",
+            "price": None,
+            "ema9": None,
+            "ema21": None,
+            "ema50": None,
+            "ema200": None,
+            "ema21_slope": None,
+        }
+    close = df["close"]
+    e9 = ema(close, 9)
+    e21 = ema(close, 21)
+    e50 = ema(close, 50)
+    e200 = ema(close, 200)
+    idx = len(df) - 1
+    price = safe_float(close.iloc[idx])
+    ema9v = safe_float(e9.iloc[idx])
+    ema21v = safe_float(e21.iloc[idx])
+    ema50v = safe_float(e50.iloc[idx])
+    ema200v = safe_float(e200.iloc[idx])
+    slope = pct_change_now(e21, idx, 5)
+    bullish = price > ema9v > ema21v > ema50v and ema50v > ema200v and slope >= 0
+    bearish = price < ema9v < ema21v < ema50v and ema50v < ema200v and slope <= 0
+    return {
+        "timeframe": label,
+        "available": True,
+        "direction": "LONG" if bullish else "SHORT" if bearish else "NONE",
+        "price": round(price, 2),
+        "ema9": round(ema9v, 2),
+        "ema21": round(ema21v, 2),
+        "ema50": round(ema50v, 2),
+        "ema200": round(ema200v, 2),
+        "ema21_slope": round(slope, 3),
+    }
+
+
+def pivot_points(df: pd.DataFrame, left: int = 3, right: int = 3) -> dict:
+    highs = []
+    lows = []
+    if len(df) < left + right + 1:
+        return {"highs": highs, "lows": lows}
+    for pos in range(left, len(df) - right):
+        window = df.iloc[pos - left:pos + right + 1]
+        row = df.iloc[pos]
+        high = safe_float(row["high"])
+        low = safe_float(row["low"])
+        if high >= safe_float(window["high"].max()):
+            highs.append({"pos": pos, "price": high, "time": str(df.index[pos])})
+        if low <= safe_float(window["low"].min()):
+            lows.append({"pos": pos, "price": low, "time": str(df.index[pos])})
+    return {"highs": highs, "lows": lows}
+
+
+def select_fib_impulse_leg(df: pd.DataFrame, direction: str, atr_value: float) -> dict | None:
+    lookback = max(80, min(FIB_EMA_LOOKBACK_BARS, len(df)))
+    recent = df.iloc[-lookback:].copy()
+    pivots = pivot_points(recent)
+    min_range = max(atr_value * FIB_EMA_MIN_IMPULSE_ATR, safe_float(recent["close"].iloc[-1]) * 0.001)
+
+    if direction == "LONG":
+        for high_pivot in reversed(pivots["highs"]):
+            lows_before = [item for item in pivots["lows"] if item["pos"] < high_pivot["pos"]]
+            if not lows_before:
+                continue
+            low_pivot = min(lows_before, key=lambda item: item["price"])
+            impulse_range = high_pivot["price"] - low_pivot["price"]
+            if impulse_range >= min_range:
+                return {
+                    "direction": direction,
+                    "swing_low": round(low_pivot["price"], 2),
+                    "swing_high": round(high_pivot["price"], 2),
+                    "swing_low_time": low_pivot["time"],
+                    "swing_high_time": high_pivot["time"],
+                    "range": round(impulse_range, 2),
+                    "impulse_atr": round(impulse_range / max(atr_value, 1e-9), 2),
+                }
+        high_pos = int(np.argmax(recent["high"].to_numpy()))
+        if high_pos >= 8:
+            low_pos = int(np.argmin(recent["low"].iloc[:high_pos].to_numpy()))
+            low = safe_float(recent["low"].iloc[low_pos])
+            high = safe_float(recent["high"].iloc[high_pos])
+            if high - low >= min_range:
+                return {
+                    "direction": direction,
+                    "swing_low": round(low, 2),
+                    "swing_high": round(high, 2),
+                    "swing_low_time": str(recent.index[low_pos]),
+                    "swing_high_time": str(recent.index[high_pos]),
+                    "range": round(high - low, 2),
+                    "impulse_atr": round((high - low) / max(atr_value, 1e-9), 2),
+                }
+
+    if direction == "SHORT":
+        for low_pivot in reversed(pivots["lows"]):
+            highs_before = [item for item in pivots["highs"] if item["pos"] < low_pivot["pos"]]
+            if not highs_before:
+                continue
+            high_pivot = max(highs_before, key=lambda item: item["price"])
+            impulse_range = high_pivot["price"] - low_pivot["price"]
+            if impulse_range >= min_range:
+                return {
+                    "direction": direction,
+                    "swing_low": round(low_pivot["price"], 2),
+                    "swing_high": round(high_pivot["price"], 2),
+                    "swing_low_time": low_pivot["time"],
+                    "swing_high_time": high_pivot["time"],
+                    "range": round(impulse_range, 2),
+                    "impulse_atr": round(impulse_range / max(atr_value, 1e-9), 2),
+                }
+        low_pos = int(np.argmin(recent["low"].to_numpy()))
+        if low_pos >= 8:
+            high_pos = int(np.argmax(recent["high"].iloc[:low_pos].to_numpy()))
+            high = safe_float(recent["high"].iloc[high_pos])
+            low = safe_float(recent["low"].iloc[low_pos])
+            if high - low >= min_range:
+                return {
+                    "direction": direction,
+                    "swing_low": round(low, 2),
+                    "swing_high": round(high, 2),
+                    "swing_low_time": str(recent.index[low_pos]),
+                    "swing_high_time": str(recent.index[high_pos]),
+                    "range": round(high - low, 2),
+                    "impulse_atr": round((high - low) / max(atr_value, 1e-9), 2),
+                }
+
+    return None
+
+
+def fib_pullback_trade_plan(price: float, atr_value: float, direction: str, leg: dict) -> dict:
+    swing_low = safe_float(leg.get("swing_low"))
+    swing_high = safe_float(leg.get("swing_high"))
+    impulse_range = max(swing_high - swing_low, 1e-9)
+    buffer = max(atr_value * FIB_EMA_STOP_BUFFER_ATR, price * 0.00012)
+
+    if direction == "LONG":
+        fib50 = swing_high - impulse_range * 0.500
+        fib618 = swing_high - impulse_range * 0.618
+        fib786 = swing_high - impulse_range * 0.786
+        fib886 = swing_high - impulse_range * 0.886
+        entry_low = fib786
+        entry_high = fib50
+        entry = price if entry_low <= price <= entry_high else (entry_low + entry_high) / 2
+        stop = min(swing_low - buffer, fib886 - buffer * 0.25)
+        risk = max(entry - stop, 1e-9)
+        target = entry + risk * 2.0
+        target_2 = swing_low + impulse_range * 2.618
+        if target_2 <= target:
+            target_2 = entry + risk * 3.0
+        invalidates = "15M closes below the 0.786 retracement or the swing low breaks."
+    else:
+        fib50 = swing_low + impulse_range * 0.500
+        fib618 = swing_low + impulse_range * 0.618
+        fib786 = swing_low + impulse_range * 0.786
+        fib886 = swing_low + impulse_range * 0.886
+        entry_low = fib50
+        entry_high = fib786
+        entry = price if entry_low <= price <= entry_high else (entry_low + entry_high) / 2
+        stop = max(swing_high + buffer, fib886 + buffer * 0.25)
+        risk = max(stop - entry, 1e-9)
+        target = entry - risk * 2.0
+        target_2 = swing_high - impulse_range * 2.618
+        if target_2 >= target:
+            target_2 = entry - risk * 3.0
+        invalidates = "15M closes above the 0.786 retracement or the swing high breaks."
+
+    reward = abs(target - entry)
+    reward_2 = abs(target_2 - entry)
+    return {
+        "entry": round(entry, 2),
+        "entry_low": round(entry_low, 2),
+        "entry_high": round(entry_high, 2),
+        "fib50": round(fib50, 2),
+        "fib618": round(fib618, 2),
+        "fib786": round(fib786, 2),
+        "fib886": round(fib886, 2),
+        "stop": round(stop, 2),
+        "target": round(target, 2),
+        "target_2": round(target_2, 2),
+        "risk": round(risk, 2),
+        "reward": round(reward, 2),
+        "reward_2": round(reward_2, 2),
+        "rr": round(reward / max(risk, 1e-9), 2),
+        "rr_tp2": round(reward_2 / max(risk, 1e-9), 2),
+        "position_1pct_10k_oz": round(100 / max(risk, 1e-9), 4),
+        "invalidates": invalidates,
+    }
+
+
+def fib_reversal_confirmation(df: pd.DataFrame, direction: str) -> dict:
+    if len(df) < 10:
+        return {"confirmed": False, "reason": "Not enough 15M candles."}
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    close = df["close"]
+    e9 = ema(close, 9)
+    e21 = ema(close, 21)
+    idx = len(df) - 1
+    ema9_slope = pct_change_now(e9, idx, 3)
+    if direction == "LONG":
+        candle_ok = safe_float(latest["close"]) > safe_float(latest["open"])
+        reclaim_ok = safe_float(latest["close"]) >= safe_float(previous["close"])
+        ema_ok = safe_float(e9.iloc[-1]) >= safe_float(e21.iloc[-1]) or ema9_slope > 0
+        return {
+            "confirmed": candle_ok and reclaim_ok and ema_ok,
+            "reason": "Bullish 15M candle, close reclaim, and EMA9/21 trigger." if candle_ok and reclaim_ok and ema_ok else "Wait for bullish 15M close/reclaim inside the fib zone.",
+            "ema9_slope": round(ema9_slope, 3),
+        }
+    candle_ok = safe_float(latest["close"]) < safe_float(latest["open"])
+    reclaim_ok = safe_float(latest["close"]) <= safe_float(previous["close"])
+    ema_ok = safe_float(e9.iloc[-1]) <= safe_float(e21.iloc[-1]) or ema9_slope < 0
+    return {
+        "confirmed": candle_ok and reclaim_ok and ema_ok,
+        "reason": "Bearish 15M candle, close rejection, and EMA9/21 trigger." if candle_ok and reclaim_ok and ema_ok else "Wait for bearish 15M close/rejection inside the fib zone.",
+        "ema9_slope": round(ema9_slope, 3),
+    }
+
+
+def compute_fibonacci_ema_pullback_signal(h1_df: pd.DataFrame, m15_df: pd.DataFrame, context: dict | None = None) -> dict:
+    context = context or {}
+    if h1_df is None or m15_df is None or len(h1_df) < 220 or len(m15_df) < 120:
+        return {
+            "signal": "WAIT",
+            "quality": "NO_DATA",
+            "direction": "NONE",
+            "reason": "Need enough H1 and 15M candles to calculate H4 alignment and Fibonacci pullback levels.",
+            "plan": None,
+            "conditions": {},
+            "alignments": [],
+        }
+
+    h4_df = resample_ohlcv(h1_df, "4h")
+    alignments = [
+        ema_alignment_snapshot(m15_df, "15M"),
+        ema_alignment_snapshot(h1_df, "1H"),
+        ema_alignment_snapshot(h4_df, "4H"),
+    ]
+    long_aligned = all(item.get("direction") == "LONG" for item in alignments)
+    short_aligned = all(item.get("direction") == "SHORT" for item in alignments)
+    direction = "LONG" if long_aligned else "SHORT" if short_aligned else "NONE"
+
+    price = safe_float(m15_df["close"].iloc[-1])
+    at = atr(m15_df, 14)
+    ax, plus_di, minus_di = adx(m15_df, 14)
+    atr_value = max(safe_float(at.iloc[-1]), price * 0.0008)
+    atr_pct = atr_value / max(price, 1e-9) * 100
+    adx_value = safe_float(ax.iloc[-1])
+    plus_div = safe_float(plus_di.iloc[-1])
+    minus_div = safe_float(minus_di.iloc[-1])
+    volatility_ok = 0.08 <= atr_pct <= 1.20
+    event_not_high = context.get("risk", "UNKNOWN") != "HIGH"
+
+    if direction == "NONE":
+        aligned_count = max(
+            sum(item.get("direction") == "LONG" for item in alignments),
+            sum(item.get("direction") == "SHORT" for item in alignments),
+        )
+        return {
+            "signal": "WAIT",
+            "quality": "NO_ALIGNMENT",
+            "direction": "NONE",
+            "confidence": int(clamp(aligned_count * 20, 5, 60)),
+            "price": round(price, 2),
+            "reason": "15M, 1H, and derived 4H EMA stacks are not aligned in one direction.",
+            "plan": None,
+            "conditions": {
+                "m15_h1_h4_ema_alignment": False,
+                "event_not_high": event_not_high,
+                "atr_usable": volatility_ok,
+            },
+            "alignments": alignments,
+            "inputs": {
+                "m15_atr14": round(atr_value, 2),
+                "atr_pct": round(atr_pct, 3),
+                "m15_adx14": round(adx_value, 1),
+                "m15_plus_di14": round(plus_div, 1),
+                "m15_minus_di14": round(minus_div, 1),
+            },
+        }
+
+    leg = select_fib_impulse_leg(m15_df, direction, atr_value)
+    if not leg:
+        return {
+            "signal": f"{direction}_WAIT",
+            "quality": "NO_IMPULSE",
+            "direction": direction,
+            "confidence": 45,
+            "price": round(price, 2),
+            "reason": f"{direction} EMA alignment exists, but no clean M15 impulse leg met the minimum ATR range.",
+            "plan": None,
+            "conditions": {
+                "m15_h1_h4_ema_alignment": True,
+                "m15_impulse_leg": False,
+                "event_not_high": event_not_high,
+                "atr_usable": volatility_ok,
+            },
+            "alignments": alignments,
+            "inputs": {
+                "m15_atr14": round(atr_value, 2),
+                "atr_pct": round(atr_pct, 3),
+                "m15_adx14": round(adx_value, 1),
+            },
+        }
+
+    plan = fib_pullback_trade_plan(price, atr_value, direction, leg)
+    tolerance = atr_value * FIB_EMA_ENTRY_TOLERANCE_ATR
+    entry_low = safe_float(plan["entry_low"])
+    entry_high = safe_float(plan["entry_high"])
+    in_zone = entry_low <= price <= entry_high
+    near_zone = entry_low - tolerance <= price <= entry_high + tolerance
+    if price > entry_high:
+        distance_to_zone = price - entry_high
+        zone_state = "ABOVE_ZONE"
+    elif price < entry_low:
+        distance_to_zone = entry_low - price
+        zone_state = "BELOW_ZONE"
+    else:
+        distance_to_zone = 0.0
+        zone_state = "IN_ZONE"
+
+    reversal = fib_reversal_confirmation(m15_df, direction)
+    risk = safe_float(plan.get("risk"))
+    rr_ok = safe_float(plan.get("rr")) >= 2.0 and risk > 0
+    impulse_ok = safe_float(leg.get("impulse_atr")) >= FIB_EMA_MIN_IMPULSE_ATR
+    di_ok = plus_div >= minus_div if direction == "LONG" else minus_div >= plus_div
+    conditions = {
+        "m15_h1_h4_ema_alignment": True,
+        "m15_impulse_leg": impulse_ok,
+        "price_inside_050_0786_zone": in_zone,
+        "price_near_entry_zone": near_zone,
+        "m15_reversal_confirmation": bool(reversal.get("confirmed")),
+        "minimum_rr_2": rr_ok,
+        "atr_usable": volatility_ok,
+        "di_confirms_direction": di_ok,
+        "event_not_high": event_not_high,
+    }
+    ready = all([
+        conditions["m15_h1_h4_ema_alignment"],
+        conditions["m15_impulse_leg"],
+        conditions["price_inside_050_0786_zone"],
+        conditions["m15_reversal_confirmation"],
+        conditions["minimum_rr_2"],
+        conditions["atr_usable"],
+        conditions["event_not_high"],
+    ])
+
+    if not event_not_high:
+        signal = "BLOCKED"
+        quality = "EVENT_RISK"
+        reason = "High-impact event risk is active; fib pullback entries are blocked until the event window clears."
+    elif ready:
+        signal = f"{direction}_ENTRY"
+        quality = "CONFIRMED" if di_ok and adx_value >= 16 else "CAUTION"
+        reason = (
+            f"{direction} clean-room fib EMA entry: M15/H1/H4 aligned, price is inside "
+            f"{plan['entry_low']}-{plan['entry_high']}, and reversal confirmed."
+        )
+    elif in_zone:
+        signal = f"{direction}_WATCH"
+        quality = "WAIT_CONFIRMATION"
+        reason = f"Price is inside the fib entry zone; wait for reversal confirmation before entry. {reversal.get('reason')}"
+    elif near_zone:
+        signal = f"{direction}_WATCH"
+        quality = "NEAR_ZONE"
+        reason = f"Price is within {round(tolerance, 2)} of the fib entry zone; prepare but wait for a 15M trigger."
+    else:
+        signal = f"{direction}_PULLBACK"
+        quality = "PENDING"
+        if direction == "LONG" and zone_state == "ABOVE_ZONE":
+            reason = f"Trend is long, but price is {distance_to_zone:.2f} above the 0.50 entry boundary. Wait for pullback."
+        elif direction == "LONG":
+            reason = f"Trend is long, but price is {distance_to_zone:.2f} below the 0.786 boundary. Wait for reclaim."
+        elif zone_state == "BELOW_ZONE":
+            reason = f"Trend is short, but price is {distance_to_zone:.2f} below the 0.50 entry boundary. Wait for bounce."
+        else:
+            reason = f"Trend is short, but price is {distance_to_zone:.2f} above the 0.786 boundary. Wait for rejection."
+
+    confidence = int(clamp(
+        25
+        + 25
+        + min(15, safe_float(leg.get("impulse_atr")) * 3)
+        + (15 if in_zone else 8 if near_zone else 0)
+        + (12 if reversal.get("confirmed") else 0)
+        + (8 if di_ok else 0)
+        + (5 if adx_value >= 18 else 0)
+        - (20 if not event_not_high else 0)
+        - (10 if not volatility_ok else 0),
+        5,
+        95,
+    ))
+    return {
+        "signal": signal,
+        "quality": quality,
+        "direction": direction,
+        "confidence": confidence,
+        "price": round(price, 2),
+        "reason": reason,
+        "plan": plan,
+        "conditions": conditions,
+        "failed_conditions": [name for name, passed in conditions.items() if not passed],
+        "alignments": alignments,
+        "leg": leg,
+        "zone_state": zone_state,
+        "distance_to_zone": round(distance_to_zone, 2),
+        "entry_tolerance": round(tolerance, 2),
+        "reversal": reversal,
+        "inputs": {
+            "m15_atr14": round(atr_value, 2),
+            "atr_pct": round(atr_pct, 3),
+            "m15_adx14": round(adx_value, 1),
+            "m15_plus_di14": round(plus_div, 1),
+            "m15_minus_di14": round(minus_div, 1),
+            "lookback_bars": min(FIB_EMA_LOOKBACK_BARS, len(m15_df)),
+            "min_impulse_atr": FIB_EMA_MIN_IMPULSE_ATR,
+        },
+        "model": "clean_room_public_fib_ema_pullback",
+        "source_note": "Approximates public Fibonacci/EMA claims; it is not copied proprietary EA code.",
+    }
+
+
+def fibonacci_ema_pullback_signal(context: dict | None = None, force: bool = False) -> dict:
+    now = datetime.now(timezone.utc)
+    cached_at = FIB_EMA_CACHE.get("ts")
+    if (
+        not force
+        and SIGNAL_CACHE_TTL_SECONDS > 0
+        and FIB_EMA_CACHE.get("data") is not None
+        and cached_at is not None
+        and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+    ):
+        return copy.deepcopy(FIB_EMA_CACHE["data"])
+
+    with FIB_EMA_CACHE_LOCK:
+        now = datetime.now(timezone.utc)
+        cached_at = FIB_EMA_CACHE.get("ts")
+        if (
+            not force
+            and SIGNAL_CACHE_TTL_SECONDS > 0
+            and FIB_EMA_CACHE.get("data") is not None
+            and cached_at is not None
+            and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+        ):
+            return copy.deepcopy(FIB_EMA_CACHE["data"])
+
+        h1_df, h1_err = fetch_data("1h")
+        m15_df, m15_err = fetch_data("15m")
+        if h1_err or m15_err or h1_df is None or m15_df is None:
+            result = {
+                "signal": "WAIT",
+                "quality": "OFFLINE",
+                "direction": "NONE",
+                "reason": h1_err or m15_err or "Missing H1/15M data.",
+                "plan": None,
+                "conditions": {},
+                "alignments": [],
+                "model": "clean_room_public_fib_ema_pullback",
+            }
+        else:
+            result = compute_fibonacci_ema_pullback_signal(h1_df, m15_df, context=context)
+            result["data_source"] = {
+                "h1": h1_df.attrs.get("source", MARKET_DATA_SOURCE),
+                "m15": m15_df.attrs.get("source", MARKET_DATA_SOURCE),
+            }
+            result["timestamp"] = now.strftime("%Y-%m-%d %H:%M UTC")
+
+        FIB_EMA_CACHE["ts"] = now
+        FIB_EMA_CACHE["data"] = copy.deepcopy(result)
+        return result
+
+
+def ct_session_label(ts: datetime | pd.Timestamp) -> str:
+    if isinstance(ts, pd.Timestamp):
+        value = ts.to_pydatetime()
+    else:
+        value = ts
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    ct = value.astimezone(ZoneInfo("America/Chicago"))
+    hour = ct.hour + ct.minute / 60
+    if 2 <= hour < 5:
+        return "LONDON_OPEN_CT"
+    if 7 <= hour < 10:
+        return "NY_OPEN_OVERLAP_CT"
+    return "OFF_SESSION"
+
+
+def ict_session_windows(allowed_sessions: set[str] | None = None) -> list[str]:
+    selected = allowed_sessions or ICT_DEFAULT_SESSIONS
+    windows = {
+        "LONDON_OPEN_CT": "02:00-05:00",
+        "NY_OPEN_OVERLAP_CT": "07:00-10:00",
+    }
+    return [windows[name] for name in sorted(selected) if name in windows]
+
+
+def ict_session_allowed(ts: datetime | pd.Timestamp, allowed_sessions: set[str] | None = None) -> bool:
+    return ct_session_label(ts) in (allowed_sessions or ICT_DEFAULT_SESSIONS)
+
+
+def is_event_blackout_time(ts: datetime | pd.Timestamp, minutes: int = 15) -> bool:
+    if isinstance(ts, pd.Timestamp):
+        value = ts.to_pydatetime()
+    else:
+        value = ts
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc)
+    for event in globals().get("PAST_EVENTS", []) + globals().get("UPCOMING_EVENTS", []):
+        try:
+            event_time = parse_utc(event.get("time_utc", ""))
+        except Exception:
+            continue
+        if abs((value - event_time).total_seconds()) <= minutes * 60:
+            return True
+    return False
+
+
+def directional_bias_from_frame(df: pd.DataFrame, label: str) -> dict:
+    if df is None or len(df) < 55:
+        return {"timeframe": label, "direction": "NONE", "reason": "insufficient bars"}
+    close = df["close"]
+    e21 = ema(close, 21)
+    e50 = ema(close, 50)
+    idx = len(df) - 1
+    price = safe_float(close.iloc[idx])
+    ema21v = safe_float(e21.iloc[idx])
+    ema50v = safe_float(e50.iloc[idx])
+    slope = pct_change_now(e21, idx, 5)
+    recent = df.iloc[-24:] if label == "4H" else df.iloc[-20:]
+    prior = df.iloc[-48:-24] if label == "4H" and len(df) >= 48 else df.iloc[-40:-20] if len(df) >= 40 else pd.DataFrame()
+    higher_high = not prior.empty and safe_float(recent["high"].max()) > safe_float(prior["high"].max())
+    higher_low = not prior.empty and safe_float(recent["low"].min()) > safe_float(prior["low"].min())
+    lower_high = not prior.empty and safe_float(recent["high"].max()) < safe_float(prior["high"].max())
+    lower_low = not prior.empty and safe_float(recent["low"].min()) < safe_float(prior["low"].min())
+
+    bullish = price > ema21v > ema50v and slope >= -0.02 and (higher_high or higher_low or prior.empty)
+    bearish = price < ema21v < ema50v and slope <= 0.02 and (lower_low or lower_high or prior.empty)
+    direction = "LONG" if bullish else "SHORT" if bearish else "NONE"
+    return {
+        "timeframe": label,
+        "direction": direction,
+        "price": round(price, 2),
+        "ema21": round(ema21v, 2),
+        "ema50": round(ema50v, 2),
+        "ema21_slope": round(slope, 3),
+        "structure": {
+            "higher_high": higher_high,
+            "higher_low": higher_low,
+            "lower_high": lower_high,
+            "lower_low": lower_low,
+        },
+        "reason": f"{label} {direction.lower()} bias from EMA21/50 and recent swing structure." if direction != "NONE" else f"{label} is mixed/ranging.",
+    }
+
+
+def ict_higher_timeframe_bias(h1_df: pd.DataFrame) -> dict:
+    h4_df = resample_ohlcv(h1_df, "4h")
+    daily_df = resample_ohlcv(h1_df, "1d")
+    h4 = directional_bias_from_frame(h4_df, "4H")
+    daily = directional_bias_from_frame(daily_df, "Daily")
+    h4_direction = h4.get("direction")
+    daily_direction = daily.get("direction")
+    if h4_direction in ("LONG", "SHORT") and daily_direction in ("NONE", h4_direction):
+        direction = h4_direction
+        allowed = True
+    else:
+        direction = "NONE"
+        allowed = False
+    return {
+        "direction": direction,
+        "allowed": allowed,
+        "h4": h4,
+        "daily": daily,
+        "reason": (
+            f"H4 bias is {h4_direction}; Daily is {daily_direction}. Trade {h4_direction.lower()} only."
+            if allowed else
+            f"No directional filter: H4 is {h4_direction}, Daily is {daily_direction}."
+        ),
+    }
+
+
+def ict_levels(df: pd.DataFrame, ts: datetime | pd.Timestamp | None = None, lookback: int = 96) -> dict:
+    if df.empty:
+        return {}
+    work = df.copy()
+    if work.index.tz is None:
+        work.index = work.index.tz_localize("UTC")
+    else:
+        work.index = work.index.tz_convert("UTC")
+    current_ts = pd.Timestamp(ts).tz_convert("UTC") if ts is not None else work.index[-1]
+    today = current_ts.date()
+    prior_days = [day for day in sorted(set(work.index.date)) if day < today]
+    previous_day = prior_days[-1] if prior_days else None
+    current = work[work.index.date == today]
+    previous = work[work.index.date == previous_day] if previous_day else pd.DataFrame()
+    asian = current[(current.index.hour >= 0) & (current.index.hour < 7)]
+    recent = work[work.index <= current_ts].tail(lookback)
+    return {
+        "previous_day": {
+            "high": round(safe_float(previous["high"].max()), 2) if not previous.empty else None,
+            "low": round(safe_float(previous["low"].min()), 2) if not previous.empty else None,
+        },
+        "asian": {
+            "high": round(safe_float(asian["high"].max()), 2) if not asian.empty else None,
+            "low": round(safe_float(asian["low"].min()), 2) if not asian.empty else None,
+        },
+        "recent_range": {
+            "high": round(safe_float(recent["high"].max()), 2) if not recent.empty else None,
+            "low": round(safe_float(recent["low"].min()), 2) if not recent.empty else None,
+        },
+    }
+
+
+def range_thirds(levels: dict) -> dict:
+    high = safe_float((levels.get("recent_range") or {}).get("high"))
+    low = safe_float((levels.get("recent_range") or {}).get("low"))
+    if high <= low:
+        return {"low": None, "high": None, "discount_max": None, "premium_min": None}
+    width = high - low
+    return {
+        "low": round(low, 2),
+        "high": round(high, 2),
+        "discount_max": round(low + width / 3, 2),
+        "premium_min": round(high - width / 3, 2),
+    }
+
+
+def zone_touches_range(zone: dict, low: float, high: float, tolerance: float = 0.0) -> bool:
+    return low <= safe_float(zone.get("high")) + tolerance and high >= safe_float(zone.get("low")) - tolerance
+
+
+def zone_in_premium_discount(zone: dict, direction: str, thirds: dict) -> bool:
+    zone_mid = (safe_float(zone.get("low")) + safe_float(zone.get("high"))) / 2
+    if direction == "LONG":
+        discount_max = thirds.get("discount_max")
+        return discount_max is not None and zone_mid <= safe_float(discount_max)
+    if direction == "SHORT":
+        premium_min = thirds.get("premium_min")
+        return premium_min is not None and zone_mid >= safe_float(premium_min)
+    return False
+
+
+def detect_ict_ob_fvg_zones(df: pd.DataFrame, direction: str, atr_series: pd.Series, lookback: int = 120) -> list[dict]:
+    if df is None or len(df) < 30 or direction not in ("LONG", "SHORT"):
+        return []
+    start = max(3, len(df) - lookback)
+    zones = []
+    current_price = safe_float(df["close"].iloc[-1])
+    current_atr = max(safe_float(atr_series.iloc[-1]), current_price * 0.0008)
+    for idx in range(start, len(df) - 2):
+        row = df.iloc[idx]
+        future = df.iloc[idx + 1:idx + 4]
+        if future.empty:
+            continue
+        open_price = safe_float(row["open"])
+        close = safe_float(row["close"])
+        high = safe_float(row["high"])
+        low = safe_float(row["low"])
+        atr_value = max(safe_float(atr_series.iloc[idx], current_atr), 1e-9)
+        impulse_up = (safe_float(future["close"].max()) - close) / atr_value
+        impulse_down = (close - safe_float(future["close"].min())) / atr_value
+        if direction == "LONG" and close < open_price and impulse_up >= ICT_MIN_IMPULSE_ATR:
+            zones.append({
+                "type": "ORDER_BLOCK",
+                "direction": direction,
+                "low": round(low, 2),
+                "high": round(high, 2),
+                "mid": round((low + high) / 2, 2),
+                "formed_at": str(df.index[idx]),
+                "score": int(clamp(55 + impulse_up * 8, 0, 100)),
+                "summary": f"LONG order block {low:.2f}-{high:.2f} before {impulse_up:.1f} ATR displacement.",
+            })
+        if direction == "SHORT" and close > open_price and impulse_down >= ICT_MIN_IMPULSE_ATR:
+            zones.append({
+                "type": "ORDER_BLOCK",
+                "direction": direction,
+                "low": round(low, 2),
+                "high": round(high, 2),
+                "mid": round((low + high) / 2, 2),
+                "formed_at": str(df.index[idx]),
+                "score": int(clamp(55 + impulse_down * 8, 0, 100)),
+                "summary": f"SHORT order block {low:.2f}-{high:.2f} before {impulse_down:.1f} ATR displacement.",
+            })
+
+    for idx in range(start + 2, len(df)):
+        prev2 = df.iloc[idx - 2]
+        row = df.iloc[idx]
+        if direction == "LONG" and safe_float(row["low"]) > safe_float(prev2["high"]):
+            low = safe_float(prev2["high"])
+            high = safe_float(row["low"])
+            zones.append({
+                "type": "FAIR_VALUE_GAP",
+                "direction": direction,
+                "low": round(low, 2),
+                "high": round(high, 2),
+                "mid": round((low + high) / 2, 2),
+                "formed_at": str(df.index[idx]),
+                "score": int(clamp(50 + ((high - low) / current_atr) * 10, 0, 100)),
+                "summary": f"LONG fair value gap {low:.2f}-{high:.2f}.",
+            })
+        if direction == "SHORT" and safe_float(row["high"]) < safe_float(prev2["low"]):
+            low = safe_float(row["high"])
+            high = safe_float(prev2["low"])
+            zones.append({
+                "type": "FAIR_VALUE_GAP",
+                "direction": direction,
+                "low": round(low, 2),
+                "high": round(high, 2),
+                "mid": round((low + high) / 2, 2),
+                "formed_at": str(df.index[idx]),
+                "score": int(clamp(50 + ((high - low) / current_atr) * 10, 0, 100)),
+                "summary": f"SHORT fair value gap {low:.2f}-{high:.2f}.",
+            })
+    deduped = []
+    seen = set()
+    for zone in sorted(zones, key=lambda item: (item["score"], item["formed_at"]), reverse=True):
+        key = (zone["type"], zone["direction"], zone["low"], zone["high"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(zone)
+    return deduped[:12]
+
+
+def select_ict_zone(h1_df: pd.DataFrame, m15_df: pd.DataFrame, direction: str, levels: dict) -> dict | None:
+    if direction not in ("LONG", "SHORT"):
+        return None
+    thirds = range_thirds(levels)
+    m15_atr = atr(m15_df, 14)
+    h1_atr = atr(h1_df, 14)
+    zones = []
+    for tf, source, atr_series, lookback in (
+        ("15M", m15_df, m15_atr, ICT_LOOKBACK_M15_BARS),
+        ("1H", h1_df, h1_atr, 72),
+    ):
+        for zone in detect_ict_ob_fvg_zones(source, direction, atr_series, lookback=lookback):
+            if not zone_in_premium_discount(zone, direction, thirds):
+                continue
+            distance = abs(safe_float(source["close"].iloc[-1]) - safe_float(zone.get("mid"))) / max(safe_float(atr_series.iloc[-1]), 1e-9)
+            zones.append({
+                **zone,
+                "timeframe": tf,
+                "distance_atr": round(distance, 2),
+                "premium_discount": thirds,
+            })
+    if not zones:
+        return None
+    return sorted(zones, key=lambda item: (item["distance_atr"], -item["score"]))[0]
+
+
+def recent_swing_levels(df: pd.DataFrame, left: int = 2, right: int = 2, lookback: int = 80) -> dict:
+    recent = df.tail(lookback)
+    pivots = pivot_points(recent, left=left, right=right)
+    highs = pivots.get("highs") or []
+    lows = pivots.get("lows") or []
+    return {
+        "high": highs[-1] if highs else None,
+        "low": lows[-1] if lows else None,
+        "highs": highs,
+        "lows": lows,
+    }
+
+
+def detect_5m_bos_retracement(m5_df: pd.DataFrame, direction: str, setup_zone: dict, atr_value: float) -> dict:
+    if m5_df is None or len(m5_df) < 60 or direction not in ("LONG", "SHORT") or not setup_zone:
+        return {"confirmed": False, "reason": "Missing 5M data, direction, or setup zone."}
+    scan = min(ICT_BOS_LOOKBACK_5M_BARS, len(m5_df) - 15)
+    best = None
+    for age in range(scan):
+        idx = len(m5_df) - 1 - age
+        if idx < 16:
+            continue
+        row = m5_df.iloc[idx]
+        history = m5_df.iloc[idx - 14:idx - 1]
+        buffer = max(atr_value * 0.05, safe_float(row["close"]) * 0.00005)
+        if direction == "LONG":
+            swing = safe_float(history["high"].max())
+            broke = safe_float(row["close"]) > swing + buffer
+        else:
+            swing = safe_float(history["low"].min())
+            broke = safe_float(row["close"]) < swing - buffer
+        if not broke:
+            continue
+        after = m5_df.iloc[idx + 1:]
+        if after.empty:
+            continue
+        retrace_mask = (
+            (after["low"] <= safe_float(setup_zone["high"]) + atr_value * ICT_ZONE_TOUCH_TOLERANCE_ATR)
+            & (after["high"] >= safe_float(setup_zone["low"]) - atr_value * ICT_ZONE_TOUCH_TOLERANCE_ATR)
+        )
+        retraced = bool(retrace_mask.any())
+        latest = m5_df.iloc[-1]
+        latest_touch = zone_touches_range(
+            setup_zone,
+            safe_float(latest["low"]),
+            safe_float(latest["high"]),
+            atr_value * ICT_ZONE_TOUCH_TOLERANCE_ATR,
+        )
+        if retraced and latest_touch:
+            best = {
+                "confirmed": True,
+                "direction": direction,
+                "bos_level": round(swing, 2),
+                "bos_time": str(m5_df.index[idx]),
+                "age_bars": len(m5_df) - 1 - idx,
+                "entry_zone": setup_zone,
+                "reason": f"5M broke structure at {swing:.2f}, then retraced into {setup_zone.get('type')} zone.",
+            }
+            break
+        if best is None:
+            best = {
+                "confirmed": False,
+                "direction": direction,
+                "bos_level": round(swing, 2),
+                "bos_time": str(m5_df.index[idx]),
+                "age_bars": len(m5_df) - 1 - idx,
+                "entry_zone": setup_zone,
+                "reason": "5M BOS exists, but the latest candle is not retracing into the setup zone.",
+            }
+    return best or {"confirmed": False, "direction": direction, "reason": "No recent 5M break of structure in the bias direction."}
+
+
+def select_ict_target(entry: float, stop: float, direction: str, levels: dict, m15_df: pd.DataFrame) -> dict | None:
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    recent = recent_swing_levels(m15_df, left=3, right=3, lookback=160)
+    raw_candidates = []
+    if direction == "LONG":
+        for label, value in (
+            ("asian_high", (levels.get("asian") or {}).get("high")),
+            ("previous_day_high", (levels.get("previous_day") or {}).get("high")),
+            ("recent_swing_high", (recent.get("high") or {}).get("price")),
+        ):
+            price = safe_float(value)
+            if price > entry:
+                raw_candidates.append((label, price))
+        raw_candidates = sorted(raw_candidates, key=lambda item: item[1])
+        for label, price in raw_candidates:
+            rr = (price - entry) / risk
+            if rr >= ICT_MIN_RR:
+                return {"price": round(price, 2), "rr": round(rr, 2), "source": label}
+    if direction == "SHORT":
+        for label, value in (
+            ("asian_low", (levels.get("asian") or {}).get("low")),
+            ("previous_day_low", (levels.get("previous_day") or {}).get("low")),
+            ("recent_swing_low", (recent.get("low") or {}).get("price")),
+        ):
+            price = safe_float(value)
+            if price < entry:
+                raw_candidates.append((label, price))
+        raw_candidates = sorted(raw_candidates, key=lambda item: item[1], reverse=True)
+        for label, price in raw_candidates:
+            rr = (entry - price) / risk
+            if rr >= ICT_MIN_RR:
+                return {"price": round(price, 2), "rr": round(rr, 2), "source": label}
+    return None
+
+
+def ict_trade_plan(direction: str, zone: dict, m5_df: pd.DataFrame, m15_df: pd.DataFrame, levels: dict) -> dict:
+    price = safe_float(m5_df["close"].iloc[-1])
+    at5 = atr(m5_df, 14)
+    atr_value = max(safe_float(at5.iloc[-1]), price * 0.0008)
+    entry = min(max(price, safe_float(zone["low"])), safe_float(zone["high"]))
+    buffer = max(atr_value * ICT_STOP_BUFFER_ATR, price * 0.00012)
+    if direction == "LONG":
+        stop = safe_float(zone["low"]) - buffer
+    else:
+        stop = safe_float(zone["high"]) + buffer
+    target = select_ict_target(entry, stop, direction, levels, m15_df)
+    if not target:
+        return {
+            "entry": round(entry, 2),
+            "stop": round(stop, 2),
+            "target": None,
+            "risk": round(abs(entry - stop), 2),
+            "reward": None,
+            "rr": None,
+            "position_1pct_10k_oz": None,
+            "invalidates": "No logical liquidity target gives at least 1:2.",
+        }
+    reward = abs(target["price"] - entry)
+    risk = abs(entry - stop)
+    return {
+        "entry": round(entry, 2),
+        "entry_low": zone.get("low"),
+        "entry_high": zone.get("high"),
+        "stop": round(stop, 2),
+        "target": target["price"],
+        "target_source": target["source"],
+        "risk": round(risk, 2),
+        "reward": round(reward, 2),
+        "rr": target["rr"],
+        "position_1pct_10k_oz": round(100 / max(risk, 1e-9), 4),
+        "invalidates": f"Setup invalidates beyond {zone.get('type')} {zone.get('low')}-{zone.get('high')}.",
+    }
+
+
+def compute_ict_bos_retracement_signal(
+    h1_df: pd.DataFrame,
+    m15_df: pd.DataFrame,
+    m5_df: pd.DataFrame,
+    context: dict | None = None,
+    allowed_sessions: set[str] | None = None,
+    model_name: str = "h4_daily_premium_discount_5m_bos_retracement",
+) -> dict:
+    context = context or {}
+    if h1_df is None or m15_df is None or m5_df is None or len(h1_df) < 220 or len(m15_df) < 120 or len(m5_df) < 120:
+        return {
+            "signal": "WAIT",
+            "quality": "NO_DATA",
+            "direction": "NONE",
+            "reason": "Need H1, 15M, and 5M candles for H4/Daily bias, zone, and BOS trigger.",
+            "trade": {},
+            "checks": {},
+            "model": model_name,
+            "allowed_sessions": sorted(allowed_sessions or ICT_DEFAULT_SESSIONS),
+            "session_windows_ct": ict_session_windows(allowed_sessions or ICT_DEFAULT_SESSIONS),
+        }
+    now_ts = m5_df.index[-1]
+    bias = ict_higher_timeframe_bias(h1_df)
+    direction = bias.get("direction")
+    levels = ict_levels(m15_df, now_ts)
+    session = ct_session_label(now_ts)
+    news_blocked = context.get("risk") == "HIGH" or is_event_blackout_time(now_ts, 15)
+    selected_sessions = allowed_sessions or ICT_DEFAULT_SESSIONS
+    session_check = "session_london_ct" if selected_sessions == ICT_LONDON_ONLY_SESSIONS else "session_london_or_ny_ct"
+    checks = {
+        "h4_daily_bias": direction in ("LONG", "SHORT"),
+        session_check: ict_session_allowed(now_ts, selected_sessions),
+        "news_blackout_clear": not news_blocked,
+    }
+    if direction not in ("LONG", "SHORT"):
+        return {
+            "signal": "WAIT",
+            "quality": "NO_BIAS",
+            "direction": "NONE",
+            "reason": bias.get("reason"),
+            "bias": bias,
+            "levels": levels,
+            "trade": {},
+            "checks": checks,
+            "session": session,
+            "model": model_name,
+            "allowed_sessions": sorted(selected_sessions),
+            "session_windows_ct": ict_session_windows(selected_sessions),
+        }
+    zone = select_ict_zone(h1_df, m15_df, direction, levels)
+    checks["premium_discount_zone"] = bool(zone)
+    if not zone:
+        return {
+            "signal": f"{direction}_WAIT",
+            "quality": "NO_ZONE",
+            "direction": direction,
+            "reason": "Bias is set, but no unmitigated H1/15M order block or FVG is sitting in premium/discount.",
+            "bias": bias,
+            "levels": levels,
+            "zone": None,
+            "trade": {},
+            "checks": checks,
+            "session": session,
+            "model": model_name,
+            "allowed_sessions": sorted(selected_sessions),
+            "session_windows_ct": ict_session_windows(selected_sessions),
+        }
+    at5 = atr(m5_df, 14)
+    bos = detect_5m_bos_retracement(m5_df, direction, zone, max(safe_float(at5.iloc[-1]), 1e-9))
+    checks["m5_bos_retracement"] = bool(bos.get("confirmed"))
+    trade = ict_trade_plan(direction, zone, m5_df, m15_df, levels) if bos.get("confirmed") else {}
+    checks["minimum_rr_2"] = bool(trade and trade.get("rr") is not None and safe_float(trade.get("rr")) >= ICT_MIN_RR)
+    executable = all(checks.values())
+    quality = "CONFIRMED" if executable else "BLOCKED" if news_blocked else "WAIT_TRIGGER"
+    signal = f"{direction}_ENTRY" if executable else f"{direction}_WATCH"
+    failed = [name for name, passed in checks.items() if not passed]
+    return {
+        "signal": signal,
+        "quality": quality,
+        "direction": direction,
+        "session": session,
+        "reason": (
+            f"{direction} A+ BOS retracement: H4/Daily bias, premium/discount zone, 5M BOS retrace, and >=1:{ICT_MIN_RR:.0f} target."
+            if executable else
+            f"Waiting: {', '.join(failed)}."
+        ),
+        "bias": bias,
+        "levels": levels,
+        "zone": zone,
+        "bos": bos,
+        "trade": trade,
+        "checks": checks,
+        "failed_checks": failed,
+        "model": model_name,
+        "allowed_sessions": sorted(selected_sessions),
+        "session_windows_ct": ict_session_windows(selected_sessions),
+        "source_note": "Clean-room implementation of the described discretionary plan; not proprietary EA code.",
+    }
+
+
+def ict_bos_retracement_signal_for_sessions(
+    context: dict | None,
+    force: bool,
+    allowed_sessions: set[str],
+    cache: dict,
+    cache_lock: threading.Lock,
+    model_name: str,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    cached_at = cache.get("ts")
+    if (
+        not force
+        and SIGNAL_CACHE_TTL_SECONDS > 0
+        and cache.get("data") is not None
+        and cached_at is not None
+        and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+    ):
+        return copy.deepcopy(cache["data"])
+    with cache_lock:
+        now = datetime.now(timezone.utc)
+        cached_at = cache.get("ts")
+        if (
+            not force
+            and SIGNAL_CACHE_TTL_SECONDS > 0
+            and cache.get("data") is not None
+            and cached_at is not None
+            and (now - cached_at).total_seconds() <= SIGNAL_CACHE_TTL_SECONDS
+        ):
+            return copy.deepcopy(cache["data"])
+        h1_df, h1_err = fetch_data("1h")
+        m15_df, m15_err = fetch_data("15m")
+        m5_df, m5_err = fetch_data("5m")
+        if h1_err or m15_err or m5_err or h1_df is None or m15_df is None or m5_df is None:
+            result = {
+                "signal": "WAIT",
+                "quality": "OFFLINE",
+                "direction": "NONE",
+                "reason": h1_err or m15_err or m5_err or "Missing timeframe data.",
+                "trade": {},
+                "checks": {},
+                "model": model_name,
+                "allowed_sessions": sorted(allowed_sessions),
+                "session_windows_ct": ict_session_windows(allowed_sessions),
+            }
+        else:
+            result = compute_ict_bos_retracement_signal(
+                h1_df,
+                m15_df,
+                m5_df,
+                context=context,
+                allowed_sessions=allowed_sessions,
+                model_name=model_name,
+            )
+            result["data_source"] = {
+                "h1": h1_df.attrs.get("source", MARKET_DATA_SOURCE),
+                "m15": m15_df.attrs.get("source", MARKET_DATA_SOURCE),
+                "m5": m5_df.attrs.get("source", MARKET_DATA_SOURCE),
+            }
+            result["timestamp"] = now.strftime("%Y-%m-%d %H:%M UTC")
+        cache["ts"] = now
+        cache["data"] = copy.deepcopy(result)
+        return result
+
+
+def ict_bos_retracement_signal(context: dict | None = None, force: bool = False) -> dict:
+    return ict_bos_retracement_signal_for_sessions(
+        context,
+        force,
+        ICT_DEFAULT_SESSIONS,
+        ICT_BOS_CACHE,
+        ICT_BOS_CACHE_LOCK,
+        "h4_daily_premium_discount_5m_bos_retracement",
+    )
+
+
+def ict_london_bos_signal(context: dict | None = None, force: bool = False) -> dict:
+    return ict_bos_retracement_signal_for_sessions(
+        context,
+        force,
+        ICT_LONDON_ONLY_SESSIONS,
+        ICT_LONDON_BOS_CACHE,
+        ICT_LONDON_BOS_CACHE_LOCK,
+        "h4_daily_london_only_premium_discount_5m_bos_retracement",
+    )
+
+
+def fetch_yfinance_5m_history(days: int = 60) -> tuple[pd.DataFrame | None, str | None]:
+    try:
+        import yfinance as yf
+        prepare_yfinance_cache(yf)
+        period = f"{int(clamp(days, 5, 60))}d"
+        df = yf.download("GC=F", period=period, interval="5m", progress=False, auto_adjust=False)
+        if df.empty:
+            return None, "Yahoo returned no 5M GC=F data"
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [str(col[0]).lower().replace(" ", "_") for col in df.columns]
+        else:
+            df.columns = [str(col).lower().replace(" ", "_") for col in df.columns]
+        df = df[["open", "high", "low", "close", "volume"]].dropna()
+        df.index = pd.to_datetime(df.index, utc=True)
+        df.attrs["source"] = "yfinance:GC=F:5m"
+        return df, None
+    except Exception as e:
+        return None, f"yfinance 5M backtest error: {compact_error(e)}"
+
+
+def ict_backtest_trade_outcome(
+    m5_df: pd.DataFrame,
+    start_idx: int,
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float,
+    max_hold_bars: int = 96,
+) -> dict:
+    end_idx = min(len(m5_df) - 1, start_idx + max_hold_bars)
+    for idx in range(start_idx + 1, end_idx + 1):
+        high = safe_float(m5_df["high"].iloc[idx])
+        low = safe_float(m5_df["low"].iloc[idx])
+        if direction == "LONG":
+            hit_sl = low <= stop
+            hit_tp = high >= target
+        else:
+            hit_sl = high >= stop
+            hit_tp = low <= target
+        if hit_sl:
+            return {"exit_idx": idx, "exit_price": stop, "result": "SL"}
+        if hit_tp:
+            return {"exit_idx": idx, "exit_price": target, "result": "TP"}
+    return {
+        "exit_idx": end_idx,
+        "exit_price": safe_float(m5_df["close"].iloc[end_idx]),
+        "result": "TIME",
+    }
+
+
+def ct_trade_day(ts: pd.Timestamp) -> str:
+    return ts.to_pydatetime().astimezone(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+
+
+def run_ict_bos_backtest(
+    days: int = 60,
+    max_checks: int = 5000,
+    risk_per_trade_pct: float = 1.0,
+    allowed_sessions: set[str] | None = None,
+    mode: str = "ict_bos_retracement_backtest",
+) -> dict:
+    m5_df, err = fetch_yfinance_5m_history(days)
+    selected_sessions = allowed_sessions or ICT_DEFAULT_SESSIONS
+    if err or m5_df is None:
+        return {"error": err or "No 5M data", "mode": mode}
+    m15_df = resample_ohlcv(m5_df, "15min")
+    h1_df = resample_ohlcv(m5_df, "1h")
+    min_m5 = 160
+    min_m15 = 140
+    min_h1 = 220
+    if len(m5_df) < min_m5 or len(m15_df) < min_m15 or len(h1_df) < min_h1:
+        return {
+            "error": "Not enough history for ICT BOS replay",
+            "bars": {"m5": len(m5_df), "m15": len(m15_df), "h1": len(h1_df)},
+            "mode": mode,
+        }
+
+    equity = 10_000.0
+    risk_fraction = clamp(risk_per_trade_pct / 100, 0.001, 0.05)
+    trades = []
+    skipped = {
+        "not_session": 0,
+        "daily_guardrail": 0,
+        "news_blackout": 0,
+        "insufficient_history": 0,
+        "no_executable_setup": 0,
+        "no_trade_plan": 0,
+    }
+    checked = 0
+    daily_state: dict[str, dict] = {}
+    start_idx = max(min_m5, min_h1 * 12)
+    idx = start_idx
+
+    while idx < len(m5_df) - 98 and checked < max_checks:
+        ts = m5_df.index[idx]
+        checked += 1
+        if not ict_session_allowed(ts, selected_sessions):
+            skipped["not_session"] += 1
+            idx += 1
+            continue
+        day = ct_trade_day(ts)
+        state = daily_state.setdefault(day, {"trades": 0, "consecutive_losses": 0})
+        if state["trades"] >= ICT_MAX_TRADES_PER_DAY or state["consecutive_losses"] >= ICT_MAX_CONSECUTIVE_LOSSES:
+            skipped["daily_guardrail"] += 1
+            idx += 1
+            continue
+        if is_event_blackout_time(ts, 15):
+            skipped["news_blackout"] += 1
+            idx += 1
+            continue
+
+        h1_history = history_until(h1_df, ts, min_h1)
+        m15_history = history_until(m15_df, ts, min_m15)
+        m5_history = m5_df.iloc[:idx + 1]
+        if h1_history is None or m15_history is None or len(m5_history) < min_m5:
+            skipped["insufficient_history"] += 1
+            idx += 1
+            continue
+
+        signal = compute_ict_bos_retracement_signal(
+            h1_history,
+            m15_history,
+            m5_history,
+            context={"risk": "LOW"},
+            allowed_sessions=selected_sessions,
+            model_name=(
+                "h4_daily_london_only_premium_discount_5m_bos_retracement"
+                if selected_sessions == ICT_LONDON_ONLY_SESSIONS else
+                "h4_daily_premium_discount_5m_bos_retracement"
+            ),
+        )
+        trade = signal.get("trade") or {}
+        if signal.get("quality") != "CONFIRMED" or signal.get("direction") not in ("LONG", "SHORT"):
+            skipped["no_executable_setup"] += 1
+            idx += 1
+            continue
+        if trade.get("stop") is None or trade.get("target") is None:
+            skipped["no_trade_plan"] += 1
+            idx += 1
+            continue
+
+        direction = signal["direction"]
+        entry = safe_float(trade.get("entry"))
+        stop = safe_float(trade.get("stop"))
+        target = safe_float(trade.get("target"))
+        risk = abs(entry - stop)
+        if risk <= 0:
+            skipped["no_trade_plan"] += 1
+            idx += 1
+            continue
+
+        outcome = ict_backtest_trade_outcome(m5_df, idx, direction, entry, stop, target)
+        exit_idx = outcome["exit_idx"]
+        exit_price = safe_float(outcome["exit_price"])
+        pnl_per_oz = exit_price - entry if direction == "LONG" else entry - exit_price
+        r_multiple = pnl_per_oz / risk
+        size_oz = (equity * risk_fraction) / risk
+        pnl = pnl_per_oz * size_oz
+        equity += pnl
+        state["trades"] += 1
+        state["consecutive_losses"] = state["consecutive_losses"] + 1 if pnl < 0 else 0
+
+        trades.append({
+            "entry_time": ts.strftime("%Y-%m-%d %H:%M"),
+            "exit_time": m5_df.index[exit_idx].strftime("%Y-%m-%d %H:%M"),
+            "ct_session": ct_session_label(ts),
+            "ct_day": day,
+            "direction": direction,
+            "result": outcome["result"],
+            "entry": round(entry, 2),
+            "stop": round(stop, 2),
+            "target": round(target, 2),
+            "target_source": trade.get("target_source"),
+            "exit": round(exit_price, 2),
+            "r": round(r_multiple, 2),
+            "pnl": round(pnl, 2),
+            "equity": round(equity, 2),
+            "zone_type": (signal.get("zone") or {}).get("type"),
+            "zone_timeframe": (signal.get("zone") or {}).get("timeframe"),
+            "zone_low": (signal.get("zone") or {}).get("low"),
+            "zone_high": (signal.get("zone") or {}).get("high"),
+        })
+        idx = exit_idx + 1
+
+    if not trades:
+        return {
+            "mode": mode,
+            "data": {
+                "symbol": "GC=F",
+                "interval": "5m",
+                "start": str(m5_df.index[0]),
+                "end": str(m5_df.index[-1]),
+                "bars": len(m5_df),
+            },
+            "sampling": {"checked_bars": checked, "skipped": skipped},
+            "metrics": {"total_signals": 0},
+            "trades": [],
+            "note": "No confirmed BOS-retracement trades passed all filters.",
+        }
+
+    total_pnl = sum(item["pnl"] for item in trades)
+    wins = [item for item in trades if item["pnl"] > 0]
+    losses = [item for item in trades if item["pnl"] < 0]
+    gross_win = sum(item["pnl"] for item in wins)
+    gross_loss = abs(sum(item["pnl"] for item in losses))
+    profit_factor = gross_win / gross_loss if gross_loss else None
+    equity_values = [10_000.0] + [item["equity"] for item in trades]
+    peak = equity_values[0]
+    max_dd = 0.0
+    for value in equity_values:
+        peak = max(peak, value)
+        max_dd = min(max_dd, value / peak - 1)
+    session_counts: dict[str, dict] = {}
+    for item in trades:
+        stats = session_counts.setdefault(item["ct_session"], {"trades": 0, "net_r": 0.0, "wins": 0, "pnl": 0.0})
+        stats["trades"] += 1
+        stats["net_r"] += item["r"]
+        stats["wins"] += 1 if item["pnl"] > 0 else 0
+        stats["pnl"] += item["pnl"]
+    by_session = {
+        key: {
+            "trades": value["trades"],
+            "win_rate": round(value["wins"] / value["trades"] * 100, 2),
+            "net_r": round(value["net_r"], 2),
+            "avg_r": round(value["net_r"] / value["trades"], 2),
+            "pnl": round(value["pnl"], 2),
+        }
+        for key, value in sorted(session_counts.items())
+    }
+    return {
+        "mode": mode,
+        "data": {
+            "symbol": "GC=F",
+            "interval": "5m",
+            "start": str(m5_df.index[0]),
+            "end": str(m5_df.index[-1]),
+            "bars": len(m5_df),
+        },
+        "settings": {
+            "days": int(clamp(days, 5, 60)),
+            "risk_per_trade_pct": risk_per_trade_pct,
+            "max_trades_per_day": ICT_MAX_TRADES_PER_DAY,
+            "max_consecutive_losses": ICT_MAX_CONSECUTIVE_LOSSES,
+            "min_rr": ICT_MIN_RR,
+            "sessions": sorted(selected_sessions),
+            "sessions_ct": ict_session_windows(selected_sessions),
+        },
+        "sampling": {"checked_bars": checked, "skipped": skipped},
+        "metrics": {
+            "total_signals": len(trades),
+            "win_rate": round(len(wins) / len(trades) * 100, 2),
+            "net_r": round(sum(item["r"] for item in trades), 2),
+            "avg_r": round(sum(item["r"] for item in trades) / len(trades), 3),
+            "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+            "net_pnl_usd": round(total_pnl, 2),
+            "return_pct": round((equity / 10_000 - 1) * 100, 2),
+            "max_drawdown_pct": round(max_dd * 100, 2),
+            "final_equity": round(equity, 2),
+            "by_session": by_session,
+        },
+        "trades": trades[-200:],
+        "disclaimer": "Research backtest only. Uses GC=F Yahoo candles, not broker XAUUSD bid/ask execution.",
+    }
+
+
+def mt5_import():
+    try:
+        import MetaTrader5 as mt5
+        return mt5, None
+    except Exception as e:
+        return None, f"MetaTrader5 Python package is not available: {compact_error(e)}"
+
+
+def mt5_connect(mt5) -> tuple[bool, str | None]:
+    kwargs = {}
+    if MT5_LOGIN:
+        try:
+            kwargs["login"] = int(MT5_LOGIN)
+        except Exception:
+            return False, "MT5_LOGIN must be numeric."
+    if MT5_PASSWORD:
+        kwargs["password"] = MT5_PASSWORD
+    if MT5_SERVER:
+        kwargs["server"] = MT5_SERVER
+    try:
+        initialized = mt5.initialize(MT5_TERMINAL_PATH, **kwargs) if MT5_TERMINAL_PATH else mt5.initialize(**kwargs)
+    except Exception as e:
+        return False, f"MT5 initialize error: {compact_error(e)}"
+    if not initialized:
+        return False, f"MT5 initialize failed: {mt5.last_error()}"
+    return True, None
+
+
+def mt5_account_payload(account) -> dict:
+    if not account:
+        return {}
+    return {
+        "login": getattr(account, "login", None),
+        "server": getattr(account, "server", None),
+        "name": getattr(account, "name", None),
+        "currency": getattr(account, "currency", None),
+        "balance": round(safe_float(getattr(account, "balance", 0)), 2),
+        "equity": round(safe_float(getattr(account, "equity", 0)), 2),
+        "margin_free": round(safe_float(getattr(account, "margin_free", 0)), 2),
+        "trade_mode": getattr(account, "trade_mode", None),
+        "leverage": getattr(account, "leverage", None),
+    }
+
+
+def mt5_symbol_payload(symbol_info) -> dict:
+    if not symbol_info:
+        return {}
+    return {
+        "symbol": getattr(symbol_info, "name", MT5_SYMBOL),
+        "digits": getattr(symbol_info, "digits", None),
+        "point": getattr(symbol_info, "point", None),
+        "contract_size": getattr(symbol_info, "trade_contract_size", None),
+        "volume_min": getattr(symbol_info, "volume_min", None),
+        "volume_step": getattr(symbol_info, "volume_step", None),
+        "volume_max": getattr(symbol_info, "volume_max", None),
+        "spread": getattr(symbol_info, "spread", None),
+        "trade_mode": getattr(symbol_info, "trade_mode", None),
+    }
+
+
+def mt5_runtime_status(include_account: bool = False) -> dict:
+    status = {
+        "autotrade_enabled": MT5_AUTOTRADE_ENABLED,
+        "manual_execution_enabled": MT5_MANUAL_EXECUTION_ENABLED,
+        "demo_mode": MT5_DEMO_MODE,
+        "symbol": MT5_SYMBOL,
+        "risk_per_trade_pct": MT5_RISK_PER_TRADE_PCT,
+        "max_volume": MT5_MAX_VOLUME,
+        "magic": MT5_MAGIC,
+        "check_seconds": MT5_CHECK_SECONDS,
+        "max_entry_drift_usd": MT5_MAX_ENTRY_DRIFT_USD,
+        "session": "LONDON_OPEN_CT",
+        "session_window_ct": ict_session_windows(ICT_LONDON_ONLY_SESSIONS),
+        "module_available": False,
+        "connected": False,
+    }
+    mt5, err = mt5_import()
+    if err:
+        return {**status, "error": err}
+    status["module_available"] = True
+    if not include_account:
+        return status
+    ok, connect_err = mt5_connect(mt5)
+    if not ok:
+        return {**status, "error": connect_err}
+    account = mt5.account_info()
+    symbol_info = mt5.symbol_info(MT5_SYMBOL)
+    if symbol_info is None:
+        mt5.symbol_select(MT5_SYMBOL, True)
+        symbol_info = mt5.symbol_info(MT5_SYMBOL)
+    return {
+        **status,
+        "connected": True,
+        "account": mt5_account_payload(account),
+        "symbol_info": mt5_symbol_payload(symbol_info),
+        "last_error": mt5.last_error(),
+    }
+
+
+def mt5_london_order_key(signal: dict) -> str:
+    trade = signal.get("trade") or {}
+    bos = signal.get("bos") or {}
+    return "|".join([
+        str(signal.get("direction")),
+        str(bos.get("bos_time")),
+        str(trade.get("entry")),
+        str(trade.get("stop")),
+        str(trade.get("target")),
+    ])
+
+
+def mt5_london_signal_blockers(signal: dict) -> list[str]:
+    trade = signal.get("trade") or {}
+    blockers = []
+    if signal.get("quality") != "CONFIRMED":
+        blockers.append(f"London strategy is not confirmed: {signal.get('quality', 'WAIT')}.")
+    if signal.get("session") != "LONDON_OPEN_CT":
+        blockers.append(f"Current signal session is {signal.get('session', 'OFF_SESSION')}; automation is London-only.")
+    if signal.get("direction") not in ("LONG", "SHORT"):
+        blockers.append("No LONG/SHORT direction.")
+    if trade.get("entry") is None or trade.get("stop") is None or trade.get("target") is None:
+        blockers.append("Entry, stop, or target is missing.")
+    if trade.get("rr") is None or safe_float(trade.get("rr")) < ICT_MIN_RR:
+        blockers.append(f"Reward/risk is below 1:{ICT_MIN_RR:.0f}.")
+    if signal.get("failed_checks"):
+        blockers.append(f"Failed checks: {', '.join(signal.get('failed_checks') or [])}.")
+    return blockers
+
+
+def mt5_daily_guardrail(mt5, symbol: str) -> dict:
+    now = datetime.now(timezone.utc)
+    ct_now = now.astimezone(ZoneInfo("America/Chicago"))
+    ct_start = ct_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = ct_start.astimezone(timezone.utc)
+    deals = mt5.history_deals_get(start, now)
+    if deals is None:
+        return {
+            "allowed": False,
+            "trades_today": None,
+            "consecutive_losses": None,
+            "reason": f"Could not read MT5 deal history for daily guardrails: {mt5.last_error()}",
+        }
+    filtered = [
+        deal for deal in deals
+        if getattr(deal, "symbol", "") == symbol and int(getattr(deal, "magic", 0) or 0) == MT5_MAGIC
+    ]
+    entry_in = getattr(mt5, "DEAL_ENTRY_IN", 0)
+    entry_out = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+    entries = [deal for deal in filtered if getattr(deal, "entry", None) == entry_in]
+    closed = sorted(
+        [deal for deal in filtered if getattr(deal, "entry", None) == entry_out],
+        key=lambda deal: getattr(deal, "time", 0),
+    )
+    consecutive_losses = 0
+    for deal in reversed(closed):
+        profit = safe_float(getattr(deal, "profit", 0)) + safe_float(getattr(deal, "swap", 0)) + safe_float(getattr(deal, "commission", 0))
+        if profit < 0:
+            consecutive_losses += 1
+        else:
+            break
+    allowed = len(entries) < ICT_MAX_TRADES_PER_DAY and consecutive_losses < ICT_MAX_CONSECUTIVE_LOSSES
+    return {
+        "allowed": allowed,
+        "trades_today": len(entries),
+        "consecutive_losses": consecutive_losses,
+        "max_trades_per_day": ICT_MAX_TRADES_PER_DAY,
+        "max_consecutive_losses": ICT_MAX_CONSECUTIVE_LOSSES,
+        "reason": "Daily guardrails clear." if allowed else "Daily trade or loss limit reached.",
+    }
+
+
+def mt5_volume_for_risk(mt5, symbol: str, direction: str, entry: float, stop: float, balance: float, symbol_info) -> dict:
+    risk_usd = balance * clamp(MT5_RISK_PER_TRADE_PCT / 100, 0.001, 0.05)
+    order_type = mt5.ORDER_TYPE_BUY if direction == "LONG" else mt5.ORDER_TYPE_SELL
+    per_lot_loss = None
+    try:
+        calc = mt5.order_calc_profit(order_type, symbol, 1.0, entry, stop)
+        if calc is not None and abs(safe_float(calc)) > 0:
+            per_lot_loss = abs(safe_float(calc))
+    except Exception:
+        per_lot_loss = None
+    if not per_lot_loss:
+        contract_size = safe_float(getattr(symbol_info, "trade_contract_size", 100), 100)
+        per_lot_loss = abs(entry - stop) * contract_size
+    raw_volume = risk_usd / max(per_lot_loss, 1e-9)
+    min_volume = safe_float(getattr(symbol_info, "volume_min", 0.01), 0.01)
+    step = safe_float(getattr(symbol_info, "volume_step", 0.01), 0.01)
+    broker_max = safe_float(getattr(symbol_info, "volume_max", MT5_MAX_VOLUME), MT5_MAX_VOLUME)
+    capped_max = max(min_volume, min(broker_max, MT5_MAX_VOLUME))
+    steps = int(max(raw_volume, 0) / max(step, 1e-9))
+    volume = round(max(min_volume, min(capped_max, steps * step)), 6)
+    return {
+        "risk_usd": round(risk_usd, 2),
+        "risk_per_trade_pct": MT5_RISK_PER_TRADE_PCT,
+        "loss_per_lot": round(per_lot_loss, 2),
+        "raw_volume": round(raw_volume, 6),
+        "volume": volume,
+        "volume_min": min_volume,
+        "volume_step": step,
+        "volume_max": capped_max,
+    }
+
+
+def mt5_execute_london_strategy(dry_run: bool = True, force_signal: bool = True, source: str = "manual") -> dict:
+    with MT5_ORDER_LOCK:
+        context = get_market_context(force=force_signal)
+        signal = ict_london_bos_signal(context, force=force_signal)
+        trade = signal.get("trade") or {}
+        blockers = mt5_london_signal_blockers(signal)
+        if source == "worker" and not MT5_AUTOTRADE_ENABLED:
+            blockers.append("MT5_AUTOTRADE_ENABLED is false.")
+        if source == "manual" and not dry_run and not MT5_MANUAL_EXECUTION_ENABLED:
+            blockers.append("MT5_MANUAL_EXECUTION_ENABLED is false.")
+        if blockers:
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "source": source,
+                "blocked": True,
+                "blockers": blockers,
+                "signal": signal,
+                "mt5": mt5_runtime_status(include_account=False),
+            }
+
+        mt5, err = mt5_import()
+        if err:
+            return {"ok": False, "dry_run": dry_run, "source": source, "blocked": True, "blockers": [err], "signal": signal}
+        ok, connect_err = mt5_connect(mt5)
+        if not ok:
+            return {"ok": False, "dry_run": dry_run, "source": source, "blocked": True, "blockers": [connect_err], "signal": signal}
+
+        account = mt5.account_info()
+        if not account:
+            return {"ok": False, "dry_run": dry_run, "source": source, "blocked": True, "blockers": [f"MT5 account unavailable: {mt5.last_error()}"], "signal": signal}
+        real_mode = getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
+        if MT5_DEMO_MODE and getattr(account, "trade_mode", None) == real_mode:
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "source": source,
+                "blocked": True,
+                "blockers": ["MT5_DEMO_MODE is true and the connected account is real. Demo account required."],
+                "account": mt5_account_payload(account),
+                "signal": signal,
+            }
+
+        if not mt5.symbol_select(MT5_SYMBOL, True):
+            return {"ok": False, "dry_run": dry_run, "source": source, "blocked": True, "blockers": [f"Could not select {MT5_SYMBOL}: {mt5.last_error()}"], "signal": signal}
+        symbol_info = mt5.symbol_info(MT5_SYMBOL)
+        tick = mt5.symbol_info_tick(MT5_SYMBOL)
+        if not symbol_info or not tick:
+            return {"ok": False, "dry_run": dry_run, "source": source, "blocked": True, "blockers": [f"Missing MT5 symbol/tick for {MT5_SYMBOL}."], "signal": signal}
+
+        direction = signal["direction"]
+        order_type = mt5.ORDER_TYPE_BUY if direction == "LONG" else mt5.ORDER_TYPE_SELL
+        price = safe_float(getattr(tick, "ask", 0)) if direction == "LONG" else safe_float(getattr(tick, "bid", 0))
+        entry = safe_float(trade.get("entry"))
+        stop = safe_float(trade.get("stop"))
+        target = safe_float(trade.get("target"))
+        drift = abs(price - entry)
+        execution_blockers = []
+        if drift > MT5_MAX_ENTRY_DRIFT_USD:
+            execution_blockers.append(f"Live MT5 price drift ${drift:.2f} is above ${MT5_MAX_ENTRY_DRIFT_USD:.2f}.")
+        if direction == "LONG" and not (stop < price < target):
+            execution_blockers.append("LONG stop/target are not valid around the live execution price.")
+        if direction == "SHORT" and not (target < price < stop):
+            execution_blockers.append("SHORT stop/target are not valid around the live execution price.")
+        positions = mt5.positions_get(symbol=MT5_SYMBOL)
+        if positions is None:
+            execution_blockers.append(f"Could not read open positions: {mt5.last_error()}")
+        else:
+            matching = [
+                pos for pos in positions
+                if int(getattr(pos, "magic", 0) or 0) == MT5_MAGIC and getattr(pos, "symbol", "") == MT5_SYMBOL
+            ]
+            if matching:
+                execution_blockers.append(f"Existing {MT5_SYMBOL} position with magic {MT5_MAGIC} is already open.")
+        order_key = mt5_london_order_key(signal)
+        if MT5_LAST_ORDER_KEY.get("key") == order_key:
+            execution_blockers.append("This London signal was already sent in the current app session.")
+        guardrail = mt5_daily_guardrail(mt5, MT5_SYMBOL)
+        if not guardrail.get("allowed"):
+            execution_blockers.append(guardrail.get("reason", "Daily guardrail blocked the order."))
+        if execution_blockers:
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "source": source,
+                "blocked": True,
+                "blockers": execution_blockers,
+                "signal": signal,
+                "account": mt5_account_payload(account),
+                "symbol_info": mt5_symbol_payload(symbol_info),
+                "guardrail": guardrail,
+                "live_price": round(price, 2),
+                "entry_drift": round(drift, 2),
+            }
+
+        sizing = mt5_volume_for_risk(mt5, MT5_SYMBOL, direction, price, stop, safe_float(getattr(account, "balance", 0)), symbol_info)
+        digits = int(getattr(symbol_info, "digits", 2) or 2)
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": MT5_SYMBOL,
+            "volume": sizing["volume"],
+            "type": order_type,
+            "price": round(price, digits),
+            "sl": round(stop, digits),
+            "tp": round(target, digits),
+            "deviation": MT5_DEVIATION_POINTS,
+            "magic": MT5_MAGIC,
+            "comment": MT5_ORDER_COMMENT[:31],
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": getattr(mt5, "ORDER_FILLING_IOC", 1),
+        }
+        payload = {
+            "ok": True,
+            "dry_run": dry_run,
+            "source": source,
+            "blocked": False,
+            "signal": signal,
+            "account": mt5_account_payload(account),
+            "symbol_info": mt5_symbol_payload(symbol_info),
+            "guardrail": guardrail,
+            "live_price": round(price, 2),
+            "entry_drift": round(drift, 2),
+            "sizing": sizing,
+            "order_request": request,
+        }
+        if dry_run:
+            return payload
+
+        result = mt5.order_send(request)
+        if result is None:
+            return {**payload, "ok": False, "blocked": True, "blockers": [f"MT5 order_send returned None: {mt5.last_error()}"]}
+        retcode = getattr(result, "retcode", None)
+        accepted = retcode in {getattr(mt5, "TRADE_RETCODE_DONE", 10009), getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}
+        result_payload = result._asdict() if hasattr(result, "_asdict") else {"retcode": retcode, "raw": str(result)}
+        if accepted:
+            MT5_LAST_ORDER_KEY.update({
+                "key": order_key,
+                "ts": utc_now_iso(),
+                "ticket": result_payload.get("order") or result_payload.get("deal"),
+            })
+        return {
+            **payload,
+            "ok": accepted,
+            "blocked": not accepted,
+            "mt5_result": result_payload,
+            "blockers": [] if accepted else [f"MT5 rejected order with retcode {retcode}."],
+        }
+
+
+async def mt5_london_worker(check_seconds: int):
+    await asyncio.sleep(max(1, MT5_AUTO_STARTUP_DELAY_SECONDS))
+    while True:
+        try:
+            result = await asyncio.to_thread(mt5_execute_london_strategy, False, False, "worker")
+            signal = result.get("signal") or {}
+            if result.get("ok"):
+                log.info(f"[MT5] London demo order sent: {result.get('mt5_result')}")
+            else:
+                blockers = result.get("blockers") or []
+                infrastructure_blocked = any(
+                    "MT5" in item or "MetaTrader5" in item or "account" in item.lower()
+                    for item in blockers
+                )
+                if signal.get("quality") == "CONFIRMED" or infrastructure_blocked:
+                    log.info(f"[MT5] London automation blocked: {blockers}")
+        except Exception as e:
+            log.error(f"[MT5] London automation error: {e}")
+        await asyncio.sleep(max(10, check_seconds))
+
+
 def utc_now_text() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -3968,6 +6192,107 @@ def record_trade_alert(snapshot: dict, source: str = "telegram_alert") -> tuple[
             return trade, False
 
     record = build_trade_record(snapshot, alert_key, source=source)
+    history["trades"].append(record)
+    save_trade_history(history)
+    upsert_signal_to_supabase(record)
+    return record, True
+
+
+def london_signal_executable(signal: dict) -> bool:
+    trade = signal.get("trade") or {}
+    return (
+        signal.get("quality") == "CONFIRMED"
+        and signal.get("direction") in ("LONG", "SHORT")
+        and signal.get("session") == "LONDON_OPEN_CT"
+        and trade.get("entry") is not None
+        and trade.get("stop") is not None
+        and trade.get("target") is not None
+        and all((signal.get("checks") or {}).values())
+    )
+
+
+def london_alert_key(signal: dict) -> str | None:
+    if not london_signal_executable(signal):
+        return None
+    trade = signal.get("trade") or {}
+    bos = signal.get("bos") or {}
+    return "LONDON_BOS:" + "|".join([
+        str(signal.get("direction")),
+        str(bos.get("bos_time") or signal.get("timestamp")),
+        str(trade.get("entry")),
+        str(trade.get("stop")),
+        str(trade.get("target")),
+    ])
+
+
+def build_london_trade_record(signal: dict, alert_key: str, source: str = "london_telegram_alert") -> dict:
+    trade = signal.get("trade") or {}
+    zone = signal.get("zone") or {}
+    bos = signal.get("bos") or {}
+    bias = signal.get("bias") or {}
+    opened_at = signal.get("timestamp") or utc_now_text()
+    return {
+        "id": trade_record_id(alert_key),
+        "alert_key": alert_key,
+        "source": source,
+        "status": "OPEN",
+        "result": "OPEN",
+        "direction": signal.get("direction"),
+        "setup_type": "LONDON_BOS_RETRACEMENT",
+        "quality": signal.get("quality"),
+        "execution_timeframe": "5M",
+        "opened_at": opened_at,
+        "opened_bar": bos.get("bos_time"),
+        "valid_until": signal_valid_until_text(opened_at),
+        "invalidated_at": None,
+        "invalidation_reason": None,
+        "user_action": "PENDING",
+        "user_action_at": None,
+        "user_notes": None,
+        "entry_low": trade.get("entry_low"),
+        "entry_high": trade.get("entry_high"),
+        "entry": trade.get("entry"),
+        "stop": trade.get("stop"),
+        "target": trade.get("target"),
+        "target_2": None,
+        "risk": trade.get("risk"),
+        "reward": trade.get("reward"),
+        "rr": trade.get("rr"),
+        "size_1pct_10k_oz": trade.get("position_1pct_10k_oz"),
+        "weighted_score": None,
+        "confidence": None,
+        "h1_score": None,
+        "m15_score": None,
+        "m5_score": None,
+        "sweep_summary": bos.get("reason"),
+        "zone_low": zone.get("low"),
+        "zone_high": zone.get("high"),
+        "zone_score": zone.get("score"),
+        "zone_summary": zone.get("summary"),
+        "reason": signal.get("reason") or (bias.get("reason") if isinstance(bias, dict) else None),
+        "closed_at": None,
+        "closed_bar": None,
+        "closed_price": None,
+        "observed_price": None,
+        "observed_high": None,
+        "observed_low": None,
+        "r_multiple": None,
+        "pnl_1pct_10k_usd": None,
+    }
+
+
+def record_london_trade_alert(signal: dict, source: str = "london_telegram_alert") -> tuple[dict | None, bool]:
+    alert_key = london_alert_key(signal)
+    if not alert_key:
+        return None, False
+
+    history = load_trade_history()
+    for trade in history["trades"]:
+        if trade.get("alert_key") == alert_key:
+            upsert_signal_to_supabase(trade)
+            return trade, False
+
+    record = build_london_trade_record(signal, alert_key, source=source)
     history["trades"].append(record)
     save_trade_history(history)
     upsert_signal_to_supabase(record)
@@ -4450,7 +6775,7 @@ def current_model_snapshot() -> dict:
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e),
+            "error": compact_error(e),
         }
 
 
@@ -5465,7 +7790,7 @@ def trade_history_payload(limit: int = 50) -> dict:
 
 
 def get_trade_snapshot(force_context: bool = False) -> dict:
-    data = get_both_signals()
+    data = get_both_signals(force=force_context)
     context = get_market_context(force=force_context)
     snapshot = {
         **data,
@@ -5474,6 +7799,8 @@ def get_trade_snapshot(force_context: bool = False) -> dict:
     }
     snapshot["hard_filters"] = hard_filter_status(snapshot, snapshot["final"])
     snapshot["timeframe_trades"] = timeframe_trade_decisions(snapshot)
+    snapshot["watch_signals"] = watch_signal_candidates(snapshot)
+    snapshot["prop_firm"] = prop_firm_snapshot(snapshot)
     return snapshot
 
 
@@ -5484,6 +7811,9 @@ def get_dashboard_snapshot(force: bool = False) -> dict:
         "event_study": get_event_study(),
         "trade_history": trade_history_payload(),
         "trend_grid_bot": trend_grid_bot_signal(snapshot, snapshot["context"]),
+        "fib_ema_pullback": fibonacci_ema_pullback_signal(snapshot["context"], force=force),
+        "ict_bos_retracement": ict_bos_retracement_signal(snapshot["context"], force=force),
+        "ict_london_bos": ict_london_bos_signal(snapshot["context"], force=force),
     }
 
 
@@ -5621,8 +7951,25 @@ def is_executable_trade(decision: dict) -> bool:
 def executable_trade_snapshots(snapshot: dict) -> list[dict]:
     trade_decisions = snapshot.get("timeframe_trades") or timeframe_trade_decisions(snapshot)
     snapshots = []
+    final = snapshot.get("final") or {}
+    if is_executable_trade(final):
+        snapshots.append({**snapshot, "final": final})
+        final_key = (
+            final.get("execution_timeframe"),
+            final.get("direction"),
+            (final.get("sweep") or {}).get("bar_time"),
+        )
+    else:
+        final_key = None
     for decision in trade_decisions:
         if is_executable_trade(decision):
+            decision_key = (
+                decision.get("execution_timeframe"),
+                decision.get("direction"),
+                (decision.get("sweep") or {}).get("bar_time"),
+            )
+            if final_key and decision_key == final_key:
+                continue
             snapshots.append({**snapshot, "final": decision})
     return snapshots
 
@@ -5672,6 +8019,20 @@ def msg_trade_alert(snapshot: dict) -> str:
         )
     valid_until = signal_valid_until_text(snapshot.get("timestamp") or utc_now_text())
     next_event = context.get("event_risk", {}).get("next_event") or {}
+    prop_line = ""
+    if PROP_MODE_ENABLED:
+        prop = prop_firm_snapshot(snapshot)
+        prop_candidate = prop.get("candidate", {})
+        prop_sizing = prop_candidate.get("sizing", {})
+        if prop_candidate.get("ready"):
+            prop_line = (
+                f"🏦 <b>Prop size</b>     <code>{fmt_trade_size(prop_sizing.get('size_oz'))}</code> "
+                f"risk <code>{safe_float(prop_sizing.get('risk_pct')):.2f}%</code> / "
+                f"<code>{fmt_money(prop_sizing.get('risk_usd'))}</code>\n"
+            )
+        else:
+            blockers = prop_candidate.get("blockers") or ["Prop gates not clear."]
+            prop_line = f"🏦 <b>Prop mode</b>     <code>WAIT</code> - {html_text(blockers[0])}\n"
 
     return (
         f"{side} <b>XAU/USD TRADE — {html_text(execution_timeframe)} {html_text(direction)}</b>\n"
@@ -5687,6 +8048,7 @@ def msg_trade_alert(snapshot: dict) -> str:
         f"⚖️ <b>RR</b>           <code>{rr_text}</code>\n"
         f"💼 <b>Size</b>         <code>{fmt_trade_size(trade.get('position_1pct_10k_oz'))}</code> "
         f"for 1% risk on $10k\n\n"
+        f"{prop_line}\n"
         f"📊 <b>Model</b>\n"
         f"Weighted score: <code>{fmt_signed_score(final.get('total_score'))}</code> · "
         f"1H: <code>{fmt_signed_score(h1.get('technical_score'))}</code> · "
@@ -5705,6 +8067,49 @@ def msg_trade_alert(snapshot: dict) -> str:
         f"🗓 <b>Next event</b> {html_text(next_event.get('name') or 'None')} "
         f"{html_text(next_event.get('eta') or '')}\n"
         f"🕐 <i>{html_text(snapshot.get('timestamp'))}</i>\n"
+        f"<i>Research only, not financial advice.</i>"
+    )
+
+
+def msg_london_trade_alert(signal: dict) -> str:
+    trade = signal.get("trade") or {}
+    zone = signal.get("zone") or {}
+    bos = signal.get("bos") or {}
+    bias = signal.get("bias") or {}
+    levels = signal.get("levels") or {}
+    prev = levels.get("previous_day") or {}
+    asian = levels.get("asian") or {}
+    direction = signal.get("direction", "WAIT")
+    side = "🟢" if direction == "LONG" else "🔴"
+    action = "BUY" if direction == "LONG" else "SELL"
+    rr = trade.get("rr")
+    rr_text = f"1 : {safe_float(rr):.2f}" if rr is not None else "--"
+    valid_until = signal_valid_until_text(signal.get("timestamp") or utc_now_text())
+    return (
+        f"{side} <b>XAU/USD LONDON TRADE — {html_text(direction)}</b>\n"
+        f"<b>{action}</b> · Strategy: <b>H4/Daily BOS Retracement</b> · Session: <b>London CT 02:00-05:00</b>\n\n"
+        f"💰 <b>Entry</b>        <code>{fmt_money(trade.get('entry'))}</code>\n"
+        f"📍 <b>Entry zone</b>   <code>{fmt_money(trade.get('entry_low'))}</code> - <code>{fmt_money(trade.get('entry_high'))}</code>\n"
+        f"🛑 <b>Stop</b>         <code>{fmt_money(trade.get('stop'))}</code>  Risk <code>{fmt_money(trade.get('risk'))}</code>\n"
+        f"🎯 <b>Target</b>       <code>{fmt_money(trade.get('target'))}</code>  "
+        f"Reward <code>{fmt_money(trade.get('reward'))}</code>\n"
+        f"⚖️ <b>RR</b>           <code>{rr_text}</code>\n"
+        f"💼 <b>Size</b>         <code>{fmt_trade_size(trade.get('position_1pct_10k_oz'))}</code> "
+        f"for 1% risk on $10k\n\n"
+        f"🧭 <b>Trigger</b>\n"
+        f"H4/Daily bias: <b>{html_text(direction)}</b> — {html_text(bias.get('reason'))}\n"
+        f"Zone: <b>{html_text(zone.get('timeframe'))} {html_text(zone.get('type'))}</b> "
+        f"<code>{fmt_money(zone.get('low'))}</code> - <code>{fmt_money(zone.get('high'))}</code>\n"
+        f"5M BOS: <code>{html_text(bos.get('bos_level'))}</code> at <code>{html_text(bos.get('bos_time'))}</code>\n"
+        f"{html_text(bos.get('reason'))}\n\n"
+        f"🏦 <b>Liquidity targets</b>\n"
+        f"Previous day H/L: <code>{fmt_money(prev.get('high'))}</code> / <code>{fmt_money(prev.get('low'))}</code>\n"
+        f"Asian H/L: <code>{fmt_money(asian.get('high'))}</code> / <code>{fmt_money(asian.get('low'))}</code>\n"
+        f"Target source: <b>{html_text(trade.get('target_source'))}</b>\n\n"
+        f"⏱ <b>Valid until</b> <code>{html_text(valid_until)}</code>\n"
+        f"🚫 <b>Invalidation</b>\n"
+        f"{html_text(trade.get('invalidates'))}\n\n"
+        f"🕐 <i>{html_text(signal.get('timestamp'))}</i>\n"
         f"<i>Research only, not financial advice.</i>"
     )
 
@@ -5757,6 +8162,65 @@ def msg_trade_cleared(prev_direction: str, snapshot: dict) -> str:
         f"Quality: <b>{html_text(final.get('quality', '--'))}</b>\n"
         f"Price: <code>{fmt_money(price)}</code>\n\n"
         f"{html_text(reason)}\n\n"
+        f"🕐 <i>{html_text(snapshot.get('timestamp'))}</i>"
+    )
+
+
+def msg_watch_alert(snapshot: dict, candidate: dict) -> str:
+    tf = candidate.get("timeframe", "--")
+    direction = candidate.get("direction", "WAIT")
+    quality = candidate.get("quality", "WATCH")
+    trade = candidate.get("trade") or {}
+    sweep = candidate.get("liquidity_sweep") or {}
+    zone = candidate.get("zone") or {}
+    hard_filters = candidate.get("hard_filters") or {}
+    conditions = candidate.get("conditions") or {}
+    score = int(safe_float(candidate.get("technical_score")))
+    side = "🟡"
+    action = "WATCH LONG" if direction == "LONG" else "WATCH SHORT"
+
+    entry = trade.get("entry") if trade.get("entry") is not None else candidate.get("price")
+    stop = trade.get("stop") if trade.get("stop") is not None else candidate.get("stop")
+    target = trade.get("target") if trade.get("target") is not None else candidate.get("target")
+    failed_checks = candidate.get("failed_stack_checks") or []
+    blocked_reasons = hard_filters.get("blocked_reasons") or []
+    stack_line = ", ".join(failed_checks) if failed_checks else "full stack still pending"
+    filter_line = "; ".join(blocked_reasons[:3]) if blocked_reasons else "hard filters currently clear"
+    zone_line = ""
+    if zone:
+        zone_line = (
+            f"15M zone: <code>{fmt_money(zone.get('low'))}</code> - <code>{fmt_money(zone.get('high'))}</code> "
+            f"score <b>{html_text(zone.get('score'))}</b>\n"
+        )
+
+    labels = {
+        "trend_aligned": "EMA regime aligned",
+        "liquidity_sweep": "Liquidity sweep",
+        "ema_reclaim": "EMA reclaim/rejection",
+        "momentum_confirmed": "Momentum confirmed",
+        "not_overextended": "Not RSI-overextended",
+    }
+    rows = "\n".join([
+        ("✅" if conditions.get(key) else "❌") + f" {label}"
+        for key, label in labels.items()
+    ])
+
+    return (
+        f"{side} <b>XAU/USD WATCH — {html_text(tf)} {html_text(direction)}</b>\n"
+        f"<b>{html_text(action)}</b> · Tier: <b>{html_text(quality)}</b> · "
+        f"Score: <code>{score:+d}</code> · "
+        f"Conditions: <b>{candidate.get('conditions_met', 0)}/{candidate.get('max_conditions', 7)}</b>\n\n"
+        f"💰 Price / entry ref: <code>{fmt_money(entry)}</code>\n"
+        f"🛑 Est stop: <code>{fmt_money(stop)}</code>\n"
+        f"🎯 Est target: <code>{fmt_money(target)}</code>\n\n"
+        f"{rows}\n\n"
+        f"🧭 Trigger\n"
+        f"{zone_line}"
+        f"{html_text(sweep.get('summary') or candidate.get('reason'))}\n"
+        f"Bar: <code>{html_text(candidate.get('bar_time'))}</code>\n\n"
+        f"Stack missing: <code>{html_text(stack_line)}</code>\n"
+        f"Filter note: <code>{html_text(filter_line)}</code>\n\n"
+        f"<i>Watch only. No executable trade is recorded until the full stack confirms.</i>\n"
         f"🕐 <i>{html_text(snapshot.get('timestamp'))}</i>"
     )
 
@@ -5851,34 +8315,133 @@ def msg_cleared(tf: str, prev: str, price: float, ts: str) -> str:
 
 def msg_startup() -> str:
     interval_minutes = max(1, TRADE_CHECK_SECONDS // 60)
+    watch_minutes = max(1, WATCH_CHECK_SECONDS // 60)
+    london_minutes = max(1, LONDON_ALERT_CHECK_SECONDS // 60)
+    watch_line = (
+        f"Watch alerts are <b>enabled</b> every <b>{watch_minutes} minutes</b>.\n"
+        if WATCH_ALERTS_ENABLED else
+        "Watch alerts are <b>disabled</b>.\n"
+    )
+    london_line = (
+        f"London BOS alerts are <b>enabled</b> every <b>{london_minutes} minutes</b>.\n"
+        if LONDON_ALERTS_ENABLED else
+        "London BOS alerts are <b>disabled</b>.\n"
+    )
     return (
         "✅ <b>XAU/USD Intelligence Bot Online</b>\n\n"
         f"Scanning for executable trades every <b>{interval_minutes} minutes</b>.\n"
-        "Telegram alerts are sent for executable <b>1H</b>, <b>15M</b>, and <b>5M</b> trades.\n\n"
+        f"{watch_line}"
+        f"{london_line}"
+        "Trade alerts are recorded only when the full <b>1H/15M/5M</b> execution stack confirms.\n\n"
         "<b>Model:</b> Technical 50% · News 20% · Macro 15% · Sentiment 15%\n"
-        "<b>Strategy:</b> 1H/15M/5M liquidity sweep/reclaim · 1:2 RR\n"
+        "<b>Strategy:</b> 1H bias · 15M order block · 5M liquidity sweep/reclaim · 1:2 RR\n"
         "<b>Data:</b> yfinance + GDELT/Fed RSS + scheduled macro event seeds"
     )
+
+
+def london_signal_blockers(signal: dict) -> list[str]:
+    if london_signal_executable(signal):
+        return []
+    blockers = list(signal.get("failed_checks") or [])
+    if signal.get("quality") != "CONFIRMED":
+        blockers.append(f"quality={signal.get('quality', 'WAIT')}")
+    if signal.get("session") != "LONDON_OPEN_CT":
+        blockers.append(f"session={signal.get('session', 'OFF_SESSION')}")
+    trade = signal.get("trade") or {}
+    for key in ("entry", "stop", "target"):
+        if trade.get(key) is None:
+            blockers.append(f"missing_{key}")
+    return list(dict.fromkeys(blockers))
+
+
+def current_london_signal(force: bool = False) -> dict:
+    context = get_market_context(force=force)
+    return ict_london_bos_signal(context, force=force)
+
+
+async def send_london_telegram_signal(force: bool = True, source: str = "london_check_now") -> dict:
+    signal = await asyncio.to_thread(current_london_signal, force)
+    alert_key = london_alert_key(signal)
+    if not alert_key:
+        return {
+            "sent": False,
+            "recorded": False,
+            "already_recorded": False,
+            "reason": "London setup is not executable.",
+            "blockers": london_signal_blockers(signal),
+            "signal": signal,
+        }
+
+    existing_trade = await asyncio.to_thread(find_trade_record, alert_key)
+    if existing_trade:
+        return {
+            "sent": False,
+            "recorded": False,
+            "already_recorded": True,
+            "trade_record": existing_trade,
+            "trade_alert_key": alert_key,
+            "signal": signal,
+        }
+
+    notification = await notify_send(
+        f"XAU/USD London trade — {signal.get('direction')}",
+        msg_london_trade_alert(signal),
+    )
+    should_record = notification["sent"] or supabase_configured()
+    record, recorded = await asyncio.to_thread(record_london_trade_alert, signal, source) if should_record else (None, False)
+    return {
+        "sent": notification["sent"],
+        "telegram_sent": notification["telegram"],
+        "email_sent": notification["email"],
+        "recorded": recorded,
+        "trade_record": record,
+        "trade_alert_key": alert_key,
+        "signal": signal,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  BACKGROUND CHECKERS
 # ═══════════════════════════════════════════════════════════════════
-async def trade_checker(check_secs: int):
-    log.info(f"[TRADE] started — every {check_secs}s")
-    last_alert_keys = set()
+async def london_alert_checker(check_secs: int):
+    log.info(f"[LONDON] started — every {check_secs}s")
+    if LONDON_ALERT_STARTUP_DELAY_SECONDS > 0:
+        await asyncio.sleep(LONDON_ALERT_STARTUP_DELAY_SECONDS)
 
     while True:
         try:
-            snapshot = get_trade_snapshot()
-            for closed_trade in update_trade_results(snapshot):
+            result = await send_london_telegram_signal(force=True, source="london_telegram_alert")
+            signal = result.get("signal") or {}
+            if result.get("sent") or result.get("recorded"):
+                log.info(f"[LONDON] alert sent {signal.get('direction')} {result.get('trade_alert_key')}")
+            elif result.get("already_recorded"):
+                log.info(f"[LONDON] duplicate suppressed {result.get('trade_alert_key')}")
+            elif signal.get("quality") == "CONFIRMED":
+                log.info(f"[LONDON] confirmed but blocked: {result.get('blockers')}")
+        except Exception as e:
+            log.error(f"[LONDON] error: {e}")
+
+        await asyncio.sleep(max(10, check_secs))
+
+
+async def trade_checker(check_secs: int):
+    log.info(f"[TRADE] started — every {check_secs}s")
+    last_alert_keys = set()
+    if TRADE_STARTUP_DELAY_SECONDS > 0:
+        await asyncio.sleep(TRADE_STARTUP_DELAY_SECONDS)
+
+    while True:
+        try:
+            snapshot = await asyncio.to_thread(get_trade_snapshot)
+            closed_trades = await asyncio.to_thread(update_trade_results, snapshot)
+            for closed_trade in closed_trades:
                 log.info(f"[TRADE] {closed_trade.get('result')} {closed_trade.get('direction')} {closed_trade.get('id')}")
                 await notify_send(
                     f"XAU/USD result — {closed_trade.get('result')} {closed_trade.get('direction')}",
                     msg_trade_result(closed_trade),
                 )
 
-            trade_snapshots = executable_trade_snapshots(snapshot)
+            trade_snapshots = await asyncio.to_thread(executable_trade_snapshots, snapshot)
             if trade_snapshots:
                 for trade_snapshot in trade_snapshots:
                     final = trade_snapshot.get("final", {})
@@ -5888,7 +8451,7 @@ async def trade_checker(check_secs: int):
 
                     direction = final.get("direction")
                     timeframe = final.get("execution_timeframe")
-                    existing_trade = find_trade_record(key)
+                    existing_trade = await asyncio.to_thread(find_trade_record, key)
                     if existing_trade:
                         last_alert_keys.add(key)
                         log.info(f"[TRADE] {timeframe} {direction} already recorded as {existing_trade.get('id')}")
@@ -5905,7 +8468,7 @@ async def trade_checker(check_secs: int):
                                 "email_alert" if notification["email"] else
                                 "signal_generated"
                             )
-                            record_trade_alert(trade_snapshot, source=source)
+                            await asyncio.to_thread(record_trade_alert, trade_snapshot, source=source)
                             last_alert_keys.add(key)
                     else:
                         log.info(f"[TRADE] active {timeframe} {direction}; duplicate alert suppressed")
@@ -5915,6 +8478,54 @@ async def trade_checker(check_secs: int):
 
         except Exception as e:
             log.error(f"[TRADE] error: {e}")
+
+        await asyncio.sleep(check_secs)
+
+
+async def watch_checker(check_secs: int):
+    log.info(f"[WATCH] started — every {check_secs}s")
+    last_alerted_keys = {}
+    last_bucket_times = {}
+    if WATCH_STARTUP_DELAY_SECONDS > 0:
+        await asyncio.sleep(WATCH_STARTUP_DELAY_SECONDS)
+
+    while True:
+        try:
+            snapshot = await asyncio.to_thread(get_trade_snapshot)
+            candidates = await asyncio.to_thread(watch_signal_candidates, snapshot)
+            now = datetime.now(timezone.utc)
+            stale_before = now - timedelta(hours=12)
+            for key, sent_at in list(last_alerted_keys.items()):
+                if sent_at < stale_before:
+                    del last_alerted_keys[key]
+
+            if not candidates:
+                log.info("[WATCH] no forming setup")
+            for candidate in candidates:
+                key = watch_alert_key(candidate)
+                if key in last_alerted_keys:
+                    continue
+
+                bucket = watch_alert_bucket(candidate)
+                last_bucket_time = last_bucket_times.get(bucket)
+                if last_bucket_time is not None:
+                    minutes_since = (now - last_bucket_time).total_seconds() / 60
+                    if minutes_since < WATCH_ALERT_COOLDOWN_MINUTES:
+                        continue
+
+                log.info(
+                    f"[WATCH] {candidate.get('timeframe')} {candidate.get('direction')} "
+                    f"{candidate.get('quality')} score={candidate.get('technical_score')}"
+                )
+                await notify_send(
+                    f"XAU/USD watch — {candidate.get('timeframe')} {candidate.get('direction')}",
+                    msg_watch_alert(snapshot, candidate),
+                )
+                last_alerted_keys[key] = now
+                last_bucket_times[bucket] = now
+
+        except Exception as e:
+            log.error(f"[WATCH] error: {e}")
 
         await asyncio.sleep(check_secs)
 
@@ -5982,7 +8593,7 @@ async def oanda_ingest_worker(check_secs: int):
     log.info(f"[OANDA] ingest worker started — every {check_secs}s")
     while True:
         try:
-            result = ingest_oanda_ohlcv(oanda_granularity_list(), count=500)
+            result = await asyncio.to_thread(ingest_oanda_ohlcv, oanda_granularity_list(), count=500)
             if result.get("ok"):
                 log.info(f"[OANDA] ingested {result.get('ingested')}")
             else:
@@ -5996,7 +8607,7 @@ async def macro_features_worker(check_secs: int):
     log.info(f"[MACRO] feature worker started — every {check_secs}s")
     while True:
         try:
-            result = insert_macro_features_to_supabase()
+            result = await asyncio.to_thread(insert_macro_features_to_supabase)
             if result.get("ok"):
                 record = result.get("record", {})
                 log.info(f"[MACRO] stored {record.get('macro_bias')} score={record.get('macro_score')}")
@@ -6014,6 +8625,9 @@ async def macro_features_worker(check_secs: int):
 async def lifespan(app: FastAPI):
     await notify_send("XAU/USD bot started", msg_startup())
     trade_task = asyncio.create_task(trade_checker(TRADE_CHECK_SECONDS))
+    watch_task = asyncio.create_task(watch_checker(WATCH_CHECK_SECONDS)) if WATCH_ALERTS_ENABLED else None
+    london_alert_task = asyncio.create_task(london_alert_checker(LONDON_ALERT_CHECK_SECONDS)) if LONDON_ALERTS_ENABLED else None
+    mt5_task = asyncio.create_task(mt5_london_worker(MT5_CHECK_SECONDS)) if MT5_AUTOTRADE_ENABLED else None
     oanda_task = None
     macro_task = None
     if OANDA_INGEST_ENABLED:
@@ -6021,10 +8635,28 @@ async def lifespan(app: FastAPI):
     if MACRO_FEATURES_ENABLED and supabase_configured():
         macro_task = asyncio.create_task(macro_features_worker(MACRO_FEATURES_INGEST_SECONDS))
     log.info("Trade checker running")
+    if watch_task:
+        log.info("Watch checker running")
+    if london_alert_task:
+        log.info("London BOS alert checker running")
+    if mt5_task:
+        log.info("MT5 London demo automation running")
     yield
     trade_task.cancel()
     with suppress(asyncio.CancelledError):
         await trade_task
+    if watch_task:
+        watch_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch_task
+    if london_alert_task:
+        london_alert_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await london_alert_task
+    if mt5_task:
+        mt5_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await mt5_task
     if oanda_task:
         oanda_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -6050,9 +8682,58 @@ def api_signals():
 def api_dashboard(refresh: bool = False):
     return JSONResponse(get_dashboard_snapshot(force=refresh))
 
+@app.get("/api/strategy/fib-ema-pullback")
+def api_fib_ema_pullback(refresh: bool = False):
+    context = get_market_context(force=refresh)
+    return JSONResponse(fibonacci_ema_pullback_signal(context, force=refresh))
+
+@app.get("/api/strategy/ict-bos-retracement")
+def api_ict_bos_retracement(refresh: bool = False):
+    context = get_market_context(force=refresh)
+    return JSONResponse(ict_bos_retracement_signal(context, force=refresh))
+
+@app.get("/api/strategy/ict-london-bos")
+def api_ict_london_bos(refresh: bool = False):
+    context = get_market_context(force=refresh)
+    return JSONResponse(ict_london_bos_signal(context, force=refresh))
+
+@app.get("/api/mt5/status")
+def api_mt5_status(request: Request, token: str = "", include_account: bool = True):
+    if not admin_authorized(request, token):
+        return error_response("admin_token_required", "admin token required", 403)
+    return JSONResponse(mt5_runtime_status(include_account=include_account))
+
+@app.post("/api/mt5/london-execute")
+def api_mt5_london_execute(
+    request: Request,
+    token: str = "",
+    dry_run: bool = True,
+    refresh: bool = True,
+):
+    if not admin_authorized(request, token):
+        return error_response("admin_token_required", "admin token required", 403)
+    result = mt5_execute_london_strategy(dry_run=dry_run, force_signal=refresh, source="manual")
+    status_code = 200
+    if not result.get("ok") and result.get("blocked") and not dry_run:
+        status_code = 409
+    if not result.get("ok") and any("MetaTrader5 Python package" in item for item in result.get("blockers", [])):
+        status_code = 503
+    return JSONResponse(result, status_code=status_code)
+
+@app.get("/api/prop/trades")
+def api_prop_trades(refresh: bool = False):
+    snapshot = get_trade_snapshot(force_context=refresh)
+    return JSONResponse({
+        "timestamp": snapshot.get("timestamp"),
+        "price": snapshot.get("price"),
+        "final": snapshot.get("final"),
+        "prop_firm": snapshot.get("prop_firm"),
+        "watch_signals": snapshot.get("watch_signals", []),
+    })
+
 @app.get("/api/trend-grid-bot")
 def api_trend_grid_bot(refresh: bool = False):
-    data = get_both_signals()
+    data = get_both_signals(force=refresh)
     context = get_market_context(force=refresh)
     return JSONResponse(trend_grid_bot_signal(data, context))
 
@@ -6342,10 +9023,26 @@ def health():
         "email":    "configured ✅" if email_configured() else "NOT configured ❌",
         "integrations": service_status(),
         "trade_check_seconds": TRADE_CHECK_SECONDS,
+        "trade_startup_delay_seconds": TRADE_STARTUP_DELAY_SECONDS,
+        "watch_alerts": {
+            "enabled": WATCH_ALERTS_ENABLED,
+            "check_seconds": WATCH_CHECK_SECONDS,
+            "startup_delay_seconds": WATCH_STARTUP_DELAY_SECONDS,
+            "cooldown_minutes": WATCH_ALERT_COOLDOWN_MINUTES,
+            "min_conditions": WATCH_MIN_CONDITIONS,
+        },
+        "london_alerts": {
+            "enabled": LONDON_ALERTS_ENABLED,
+            "check_seconds": LONDON_ALERT_CHECK_SECONDS,
+            "startup_delay_seconds": LONDON_ALERT_STARTUP_DELAY_SECONDS,
+            "session_window_ct": ict_session_windows(ICT_LONDON_ONLY_SESSIONS),
+            "telegram_configured": bool(TG_TOKEN and TG_CHAT_ID),
+        },
         "market_data": {
             "source": MARKET_DATA_SOURCE,
             "fallback_order": ["supabase", "oanda", "yfinance"] if MARKET_DATA_SOURCE == "auto" else [MARKET_DATA_SOURCE],
             "supabase_source": SUPABASE_OHLCV_SOURCE,
+            "signal_cache_ttl_seconds": SIGNAL_CACHE_TTL_SECONDS,
         },
         "oanda": {
             "environment": OANDA_ENV,
@@ -6359,10 +9056,24 @@ def health():
             "max_spread_cents": MAX_SPREAD_CENTS,
             "spread_configured": XAUUSD_SPREAD_CENTS != "",
         },
+        "signal_tuning": {
+            "sweep_scan_bars_5m": LIQUIDITY_SWEEP_SCAN_BARS_5M,
+            "sweep_scan_bars_15m": LIQUIDITY_SWEEP_SCAN_BARS_15M,
+            "sweep_scan_bars_1h": LIQUIDITY_SWEEP_SCAN_BARS_1H,
+            "order_block_impulse_atr": ORDER_BLOCK_IMPULSE_ATR,
+            "order_block_min_score": ORDER_BLOCK_MIN_SCORE,
+            "order_block_tested_min_score": ORDER_BLOCK_TESTED_MIN_SCORE,
+            "order_block_test_tolerance_atr": ORDER_BLOCK_TEST_TOLERANCE_ATR,
+            "technical_signal_threshold_5m": TECHNICAL_SIGNAL_THRESHOLD_5M,
+            "technical_signal_threshold_15m": TECHNICAL_SIGNAL_THRESHOLD_15M,
+            "technical_signal_threshold_1h": TECHNICAL_SIGNAL_THRESHOLD_1H,
+            "stack_h1_bias_min_score": STACK_H1_BIAS_MIN_SCORE,
+        },
         "signal_lifecycle": {
             "valid_minutes": SIGNAL_VALID_MINUTES,
             "invalidation_atr_buffer": SIGNAL_INVALIDATION_ATR_BUFFER,
         },
+        "prop_firm": prop_firm_rules(),
         "notifications": {
             "email_backup_mode": EMAIL_BACKUP_MODE,
             "email_recipients": len(email_recipients()),
@@ -6380,7 +9091,8 @@ async def test_notification(request: Request, token: str = ""):
         "🧪 <b>Test — XAU/USD Intelligence Bot</b>\n\n"
         "✅ Notification channel working.\n\n"
         f"Trade scanner interval: {max(1, TRADE_CHECK_SECONDS // 60)} minutes\n"
-        "Alerts send when 1H, 15M, or 5M has an executable LONG/SHORT trade.\n\n"
+        f"Watch scanner interval: {max(1, WATCH_CHECK_SECONDS // 60)} minutes\n"
+        "Trade alerts record only after the full 1H/15M/5M stack confirms; watch alerts are heads-up only.\n\n"
         "<i>Test only.</i>"
     )
     return result
@@ -6454,10 +9166,19 @@ async def check_now(request: Request, token: str = ""):
     }
 
 
+@app.get("/api/london/check-now")
+@app.post("/api/london/check-now")
+async def api_london_check_now(request: Request, token: str = ""):
+    if not admin_authorized(request, token):
+        return JSONResponse({"error": "admin token required"}, status_code=403)
+    result = await send_london_telegram_signal(force=True, source="london_check_now")
+    return JSONResponse(result, status_code=200 if result.get("sent") or not result.get("trade_alert_key") else 202)
+
+
 @app.get("/api/trades")
 def api_trades(refresh: bool = False, limit: int = 100):
     if refresh:
-        data = get_both_signals()
+        data = get_both_signals(force=True)
         update_trade_results(data)
     return JSONResponse(trade_history_payload(limit=max(1, min(limit, 500))))
 
@@ -6566,6 +9287,44 @@ def api_backtest_supabase_stack(
     return JSONResponse(result, status_code=status_code)
 
 
+@app.get("/api/backtest/ict-bos-retracement")
+def api_backtest_ict_bos_retracement(
+    request: Request,
+    token: str = "",
+    days: int = 60,
+    max_checks: int = 5000,
+    risk_per_trade_pct: float = 1.0,
+):
+    if not admin_authorized(request, token):
+        return error_response("admin_token_required", "admin token required", 403)
+    result = run_ict_bos_backtest(
+        days=max(5, min(days, 60)),
+        max_checks=max(100, min(max_checks, 20000)),
+        risk_per_trade_pct=max(0.1, min(risk_per_trade_pct, 5.0)),
+    )
+    return JSONResponse(result, status_code=503 if result.get("error") else 200)
+
+
+@app.get("/api/backtest/ict-london-bos")
+def api_backtest_ict_london_bos(
+    request: Request,
+    token: str = "",
+    days: int = 60,
+    max_checks: int = 5000,
+    risk_per_trade_pct: float = 1.0,
+):
+    if not admin_authorized(request, token):
+        return error_response("admin_token_required", "admin token required", 403)
+    result = run_ict_bos_backtest(
+        days=max(5, min(days, 60)),
+        max_checks=max(100, min(max_checks, 20000)),
+        risk_per_trade_pct=max(0.1, min(risk_per_trade_pct, 5.0)),
+        allowed_sessions=ICT_LONDON_ONLY_SESSIONS,
+        mode="ict_london_only_bos_retracement_backtest",
+    )
+    return JSONResponse(result, status_code=503 if result.get("error") else 200)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  DASHBOARD
 # ═══════════════════════════════════════════════════════════════════
@@ -6583,7 +9342,11 @@ h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:u
 button,.navlink,.tablink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,.navlink:hover,.tablink:hover{border-color:#b99036}
 .tabs-nav{display:flex;gap:8px;margin:12px 0}.tablink{margin-left:0}.tablink.active{background:#2a2518;border-color:#b99036;color:#f2c76b}
 .grid{display:grid;gap:10px}.hero{grid-template-columns:1.25fr .75fr}.four{grid-template-columns:repeat(4,1fr)}.three{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:repeat(2,1fr)}
+.technical-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
 .panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.panel.tight{padding:10px}
+.data-alert{border:1px solid rgba(239,106,91,.45);background:rgba(239,106,91,.08);color:#f2b1a9;border-radius:7px;padding:9px;margin-top:10px;font-size:12px;line-height:1.4}
+.source-strip{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.source-strip span{border:1px solid #343126;background:#10100c;border-radius:6px;padding:5px 7px;font-size:11px;color:#c9c0ae}.source-strip b{color:#ece7dc}
+.empty-chart{height:92px;display:grid;place-items:center;border:1px dashed #343126;border-radius:7px;margin-top:8px;color:#817b70;font-size:11px}
 .label{font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.muted{color:#9f9a8f}.small{font-size:12px}.tiny{font-size:11px}.long{color:#4ecb71}.short{color:#ef6a5b}.wait{color:#d7a93f}.blue{color:#6bb7d7}.violet{color:#b999e6}
 .decision{min-height:255px;display:flex;flex-direction:column;justify-content:space-between}.direction{font-size:58px;line-height:.92;font-weight:900;letter-spacing:-.03em;margin:8px 0 5px}.reason{font-size:13px;color:#c9c0ae;line-height:1.45;max-width:900px}
 .scoreline{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.pill{border:1px solid #393528;background:#1b1a14;border-radius:999px;padding:6px 9px;font-size:12px;color:#d8d0bf}
@@ -6595,7 +9358,7 @@ canvas{width:100%;height:92px;display:block;margin-top:8px}.tf-head{display:flex
 .kv{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:10px}.kv div{background:#10100c;border:1px solid #28251d;border-radius:7px;padding:8px}.kv span{display:block;font-size:9px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.1em}.kv b{font-size:13px;margin-top:3px;display:block}
 .headline{display:grid;grid-template-columns:8px 1fr auto;gap:9px;border-bottom:1px solid #2c2a21;padding:8px 0;font-size:12px;line-height:1.35}.headline:last-child{border-bottom:0}.dot{width:8px;height:8px;border-radius:99px;background:#9f9a8f;margin-top:5px}
 .playbook{line-height:1.45;color:#c9c0ae}.split{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start}.risk{font-size:25px;font-weight:900}.foot{font-size:11px;color:#817b70;margin-top:14px;line-height:1.45}
-@media(max-width:920px){main{padding:11px}.top,.hero,.four,.three,.two{grid-template-columns:1fr}.direction{font-size:42px}.kv{grid-template-columns:repeat(2,1fr)}.stamp{text-align:left}.barrow{grid-template-columns:76px 1fr 62px}}
+@media(max-width:920px){main{padding:11px}.top,.hero,.four,.three,.two,.technical-grid{grid-template-columns:1fr}.direction{font-size:42px}.kv{grid-template-columns:repeat(2,1fr)}.stamp{text-align:left}.barrow{grid-template-columns:76px 1fr 62px}}
 </style>
 </head>
 <body>
@@ -6604,9 +9367,9 @@ canvas{width:100%;height:92px;display:block;margin-top:8px}.tf-head{display:flex
     <div>
       <h1>AURUM Risk OS</h1>
       <div class="sub">XAU/USD intraday cockpit: live news search, scheduled event risk, public-web sentiment, 1H EMA regime, 15M/5M liquidity sweep execution.</div>
-      <div class="tabs-nav"><a class="tablink active" href="/">Cockpit</a><a class="tablink" href="/trades">Journal</a><a class="tablink" href="/ops">Ops</a></div>
+      <div class="tabs-nav"><a class="tablink active" href="/">Cockpit</a><a class="tablink" href="/london">London</a><a class="tablink" href="/trades">Journal</a><a class="tablink" href="/ops">Ops</a></div>
     </div>
-    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/trades">Journal</a><a class="navlink" href="/ops">Ops</a></div>
+    <div class="stamp"><div id="status">loading...</div><button onclick="loadDashboard(true)">Refresh Feed</button><a class="navlink" href="/london">London</a><a class="navlink" href="/trades">Journal</a><a class="navlink" href="/ops">Ops</a></div>
   </div>
   <div id="app"><div class="panel">Loading market state...</div></div>
   <div class="foot">Research only, not financial advice. Free feeds can lag or fail; liquidity-sweep signals are rules-based approximations, not broker-grade order-flow data.</div>
@@ -6661,16 +9424,134 @@ function metrics(items){
   return items.map(([label,value,klass,hint])=>`<div class="metric"><span class="label">${esc(label)}</span><b class="${klass||''}">${value}</b><div class="tiny muted">${esc(hint||'')}</div></div>`).join('');
 }
 
+function pctValue(value){
+  const num=Number(value);
+  return Number.isFinite(num)?num.toFixed(1)+'%':'--';
+}
+
+function biasSummaryMetrics(source,fallbackItems=[]){
+  const items=fallbackItems||[];
+  const bullish=Number.isFinite(Number(source?.bullish_count))?Number(source.bullish_count):items.filter(item=>String(item.bias||item.gold_bias||'').toLowerCase().includes('bull')).length;
+  const bearish=Number.isFinite(Number(source?.bearish_count))?Number(source.bearish_count):items.filter(item=>String(item.bias||item.gold_bias||'').toLowerCase().includes('bear')).length;
+  const neutral=Number.isFinite(Number(source?.neutral_count))?Number(source.neutral_count):Math.max(0,items.length-bullish-bearish);
+  const total=Math.max(1,bullish+bearish+neutral);
+  const bullishPct=Number.isFinite(Number(source?.bullish_pct))?Number(source.bullish_pct):(bullish/total*100);
+  const bearishPct=Number.isFinite(Number(source?.bearish_pct))?Number(source.bearish_pct):(bearish/total*100);
+  const neutralPct=Number.isFinite(Number(source?.neutral_pct))?Number(source.neutral_pct):(neutral/total*100);
+  return metrics([
+    ['Bullish',pctValue(bullishPct),'long',`${bullish}/${total} items`],
+    ['Bearish',pctValue(bearishPct),'short',`${bearish}/${total} items`],
+    ['Neutral',pctValue(neutralPct),'wait',`${neutral}/${total} items`],
+    ['Score',`${source?.score>0?'+':''}${source?.score??0}`,(source?.score??0)>0?'long':(source?.score??0)<0?'short':'wait',source?.source||'live feed'],
+  ]);
+}
+
+function dataHealthCard(key,label,data){
+  const d=data?.[key]||{}, chartBars=(d.chart?.price||[]).length;
+  const ok=!d.error&&Number(d.data_bars||0)>0&&chartBars>0;
+  return `<div class="metric">
+    <span class="label">${label} data</span>
+    <b class="${ok?'long':'short'}">${ok?'ONLINE':'NO DATA'}</b>
+    <div class="tiny muted">${esc(d.data_source||'no source')} ${esc(d.data_granularity||'')} · ${d.data_bars??0} bars · chart ${chartBars}</div>
+    <div class="tiny muted">Last bar ${esc(d.bar_time||d.timestamp||'--')}</div>
+    ${d.error?`<div class="tiny short">${esc(d.error)}</div>`:''}
+  </div>`;
+}
+
+function renderDataHealth(data){
+  return `<section class="panel tight">
+    <div class="split">
+      <div><div class="label">Market data health</div><div class="tiny muted">Dashboard must have 1H, 15M, and 5M candles before trade logic is valid.</div></div>
+      <div class="risk ${data?.m5?.error?'short':'long'}">${data?.m5?.error?'M5 DOWN':'M5 OK'}</div>
+    </div>
+    <div class="grid three" style="margin-top:10px">
+      ${dataHealthCard('h1','1H',data)}
+      ${dataHealthCard('m15','15M',data)}
+      ${dataHealthCard('m5','5M',data)}
+    </div>
+  </section>`;
+}
+
+function renderPropFirm(data){
+  const prop=data.prop_firm||{}, rules=prop.rules||{}, state=prop.state||{}, candidate=prop.candidate||{}, sizing=candidate.sizing||{}, pass=candidate.pass_math||{};
+  const ready=!!candidate.ready;
+  const blockers=(candidate.blockers||[]).map(item=>`<tr><td>${esc(item)}</td></tr>`).join('')||'<tr><td class="long">All prop gates clear for the current model signal.</td></tr>';
+  const guards=(prop.guards||[]).map(item=>`<span class="pill">${esc(item)}</span>`).join('');
+  return `<div class="section-title"><h2>Prop Firm Trade Generator</h2><span class="${ready?'long':'wait'}">${esc(candidate.status||'WAIT')}</span></div>
+  <section class="panel">
+    <div class="split">
+      <div>
+        <div class="label">${esc(rules.firm_name||'Prop account')}</div>
+        <div class="tf-title ${ready?dirCls(candidate.direction):'wait'}">${esc(candidate.action||'NO_TRADE')} ${ready?esc(candidate.direction||''):''}</div>
+        <div class="reason">${esc(candidate.reason||'Waiting for a full-stack, rule-compliant setup.')}</div>
+      </div>
+      <div class="risk ${ready?'long':'wait'}">${ready?'READY':'WAIT'}</div>
+    </div>
+    <div class="grid four" style="margin-top:12px">${metrics([
+      ['Account',money(rules.account_size),'',`${rules.profit_target_pct??'--'}% target`],
+      ['Progress',`${state.target_progress_pct??0}%`,state.target_progress_pct>=75?'long':state.target_progress_pct<0?'short':'wait',`${money(state.target_remaining_usd)} remaining`],
+      ['Phase',state.phase||'--',state.phase==='PROTECT'?'wait':state.phase==='TARGET_REACHED'?'long':'',`${state.phase_risk_pct??0}% risk mode`],
+      ['Today',`${state.trades_today??0}/${rules.max_trades_per_day??0}`,state.losses_today>0?'wait':'',`${state.losses_today??0} losses · ${money(state.daily_risk_left_usd)} risk left`],
+    ])}</div>
+    <div class="grid four" style="margin-top:10px">${metrics([
+      ['Entry',money(candidate.entry),'',candidate.entry_low!=null?`${money(candidate.entry_low)}-${money(candidate.entry_high)}`:'market/zone'],
+      ['Stop',money(candidate.stop),'short',`${money(sizing.stop_distance)} stop distance`],
+      ['Target',money(candidate.target),'long',`RR ${candidate.rr??'--'}`],
+      ['Size',`${sizing.size_oz??0} oz`,'wait',`${money(sizing.risk_usd)} risk · ${sizing.risk_pct??0}%`],
+    ])}</div>
+    <div class="grid four" style="margin-top:10px">${metrics([
+      ['TP1 $',money(sizing.target_profit_usd),'long','estimated if TP1 hits'],
+      ['TP2 $',money(sizing.target_2_profit_usd),'long','estimated if TP2 hits'],
+      ['R to target',pass.r_to_target??'--','wait',`${pass.two_r_wins_to_target??'--'} TP1 wins needed`],
+      ['Confidence',`${candidate.confidence??0}%`,candidate.confidence>=rules.min_confidence?'long':'wait',`min ${rules.min_confidence??'--'}%`],
+    ])}</div>
+    <div class="scoreline">${guards}</div>
+    <table style="margin-top:10px"><thead><tr><th>Gate blockers</th></tr></thead><tbody>${blockers}</tbody></table>
+    <div class="tiny muted" style="margin-top:8px">${esc(candidate.disclaimer||'Research only.')} ${esc(state.note||'')}</div>
+  </section>`;
+}
+
+function renderWatchSetups(data){
+  const items=data.watch_signals||[];
+  const rows=items.map(item=>{
+    const filters=item.hard_filters||{}, blocked=(filters.blocked_reasons||[]).slice(0,2).join('; ');
+    const missing=(item.failed_stack_checks||[]).slice(0,4).join(', ')||'--';
+    const quality=esc(item.quality||'WATCH');
+    return `<tr>
+      <td><b class="${dirCls(item.direction)}">${esc(item.timeframe||'--')} ${esc(item.direction||'--')}</b><div class="tiny muted">${quality}</div></td>
+      <td class="${cls(item.technical_score||0)}">${signed(item.technical_score)}</td>
+      <td>${item.conditions_met??0}/${item.max_conditions??7}</td>
+      <td>${money(item.price)}</td>
+      <td>${esc(missing)}</td>
+      <td class="${filters.allowed?'long':'wait'}">${filters.allowed?'clear':esc(blocked||'watch')}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="6" class="muted">No active watch setups.</td></tr>';
+  return `<div class="section-title"><h2>Watch Setups</h2><span class="muted small">${items.length} active</span></div>
+  <section class="panel">
+    <table><thead><tr><th>Setup</th><th>Score</th><th>Conditions</th><th>Price</th><th>Stack missing</th><th>Filters</th></tr></thead><tbody>${rows}</tbody></table>
+  </section>`;
+}
+
 function renderTf(key,data){
-  const d=data?.[key]||{}, ind=d.indicators||{}, score=d.technical_score||0, comp=d.components||{}, sweep=d.liquidity_sweep||{};
+  const d=data?.[key]||{}, ind=d.indicators||{}, comp=d.components||{}, sweep=d.liquidity_sweep||{};
+  const scoreValue=Number.isFinite(Number(d.technical_score))?Number(d.technical_score):null;
+  const score=scoreValue??0;
+  const hasChart=(d.chart?.price||[]).length>0;
   const id='chart-'+key;
   const label=key==='h1'?'1H EMA regime':key==='m15'?'15M execution tape':'5M micro execution tape';
   return `<section class="panel">
     <div class="tf-head">
       <div><div class="label">${label}</div><div class="tf-title ${dirCls(d.setup_direction)}">${esc(d.setup_direction||'NONE')}</div></div>
-      <div class="tf-score ${cls(score)}">${score>0?'+':''}${score}</div>
+      <div class="tf-score ${scoreValue==null?'wait':cls(score)}">${scoreValue==null?'--':`${score>0?'+':''}${score}`}</div>
     </div>
-    <canvas id="${id}"></canvas>
+    ${d.error?`<div class="data-alert">${esc(d.error)}</div>`:''}
+    <div class="source-strip">
+      <span>Source <b>${esc(d.data_source||'--')}</b></span>
+      <span>Granularity <b>${esc(d.data_granularity||'--')}</b></span>
+      <span>Bars <b>${d.data_bars??0}</b></span>
+      <span>Last <b>${esc(d.bar_time||'--')}</b></span>
+    </div>
+    ${hasChart?`<canvas id="${id}"></canvas>`:`<div class="empty-chart">No ${label} chart data</div>`}
     <div class="kv">
       <div><span>EMA 9/21</span><b>${money(ind.ema9)} / ${money(ind.ema21)}</b></div>
       <div><span>EMA 50/200</span><b>${money(ind.ema50)} / ${money(ind.ema200)}</b></div>
@@ -6718,9 +9599,94 @@ function renderGridBot(bot){
   </section>`;
 }
 
+function renderFibBot(bot){
+  const plan=bot.plan||{}, inputs=bot.inputs||{}, leg=bot.leg||{}, reversal=bot.reversal||{};
+  const conditions=bot.conditions||{}, failed=bot.failed_conditions||[];
+  const conditionRows=Object.entries(conditions).map(([key,value])=>`<span class="pill">${esc(key.replaceAll('_',' '))} <b class="${value?'long':'short'}">${value?'YES':'NO'}</b></span>`).join('');
+  const alignmentRows=(bot.alignments||[]).map(row=>`<tr>
+    <td>${esc(row.timeframe)}</td>
+    <td class="${dirCls(row.direction)}">${esc(row.direction||'NONE')}</td>
+    <td>${money(row.price)}</td>
+    <td>${money(row.ema9)} / ${money(row.ema21)}</td>
+    <td>${money(row.ema50)} / ${money(row.ema200)}</td>
+    <td class="${cls(row.ema21_slope||0)}">${row.ema21_slope??'--'}</td>
+  </tr>`).join('')||'<tr><td colspan="6" class="muted">No EMA alignment data.</td></tr>';
+  const failedText=failed.length?failed.map(item=>esc(item.replaceAll('_',' '))).join(', '):'all setup checks passed';
+  return `<section class="panel">
+    <div class="split">
+      <div>
+        <div class="label">Fibonacci EMA pullback strategy</div>
+        <div class="tf-title ${dirCls(bot.signal)}">${esc(bot.signal||'WAIT')}</div>
+        <div class="reason">${esc(bot.reason||'')}</div>
+      </div>
+      <div class="risk ${dirCls(bot.direction)}">${esc(bot.quality||'--')}</div>
+    </div>
+    <div class="grid four" style="margin-top:12px">${metrics([
+      ['Entry zone',plan.entry_low==null?'--':`${money(plan.entry_low)}-${money(plan.entry_high)}`,'',`state ${bot.zone_state||'--'}`],
+      ['Preferred entry',money(plan.entry),'wait',`current ${money(bot.price)}`],
+      ['Stop',money(plan.stop),'short',plan.invalidates||'no active plan'],
+      ['TP1 / TP2',`${money(plan.target)} / ${money(plan.target_2)}`,'long',`RR ${plan.rr??'--'} / ${plan.rr_tp2??'--'}`],
+    ])}</div>
+    <div class="grid four" style="margin-top:10px">${metrics([
+      ['Impulse',leg.range==null?'--':money(leg.range),'blue',`${leg.impulse_atr??'--'}x ATR`],
+      ['Swing low',money(leg.swing_low),'',leg.swing_low_time||'--'],
+      ['Swing high',money(leg.swing_high),'',leg.swing_high_time||'--'],
+      ['Size',plan.position_1pct_10k_oz==null?'--':plan.position_1pct_10k_oz+' oz','wait','1% risk on $10k'],
+    ])}</div>
+    <div class="scoreline">
+      <span class="pill">Fib 50 <b>${money(plan.fib50)}</b></span>
+      <span class="pill">Fib 61.8 <b>${money(plan.fib618)}</b></span>
+      <span class="pill">Fib 78.6 <b>${money(plan.fib786)}</b></span>
+      <span class="pill">Distance <b>${money(bot.distance_to_zone)}</b></span>
+      <span class="pill">Confidence <b>${bot.confidence??0}%</b></span>
+    </div>
+    <div class="scoreline">${conditionRows}</div>
+    <table style="margin-top:10px"><thead><tr><th>TF</th><th>Bias</th><th>Price</th><th>EMA9/21</th><th>EMA50/200</th><th>EMA21 slope</th></tr></thead><tbody>${alignmentRows}</tbody></table>
+    <div class="tiny muted" style="margin-top:8px">Trigger: ${esc(reversal.reason||'--')} Failed checks: ${failedText}. ${esc(bot.source_note||'')}</div>
+    <div class="tiny muted">Inputs: M15 ATR ${money(inputs.m15_atr14)}, ADX ${inputs.m15_adx14??'--'}, ATR% ${inputs.atr_pct??'--'}, lookback ${inputs.lookback_bars??'--'} bars.</div>
+  </section>`;
+}
+
+function renderIctBot(bot){
+  const trade=bot.trade||{}, zone=bot.zone||{}, bias=bot.bias||{}, levels=bot.levels||{}, checks=bot.checks||{}, bos=bot.bos||{};
+  const prev=levels.previous_day||{}, asian=levels.asian||{}, range=levels.recent_range||{};
+  const checkRows=Object.entries(checks).map(([key,value])=>`<span class="pill">${esc(key.replaceAll('_',' '))} <b class="${value?'long':'short'}">${value?'YES':'NO'}</b></span>`).join('');
+  const failed=(bot.failed_checks||[]).map(item=>esc(item.replaceAll('_',' '))).join(', ')||'all checks passed';
+  return `<section class="panel">
+    <div class="split">
+      <div>
+        <div class="label">H4/Daily premium-discount BOS strategy</div>
+        <div class="tf-title ${dirCls(bot.signal)}">${esc(bot.signal||'WAIT')}</div>
+        <div class="reason">${esc(bot.reason||'')}</div>
+      </div>
+      <div class="risk ${dirCls(bot.direction)}">${esc(bot.quality||'--')}</div>
+    </div>
+    <div class="grid four" style="margin-top:12px">${metrics([
+      ['Bias',bot.direction||'NONE',dirCls(bot.direction),bias.reason||'H4/Daily filter'],
+      ['Session',bot.session||'--',bot.session==='OFF_SESSION'?'wait':'long','Plano CT windows only'],
+      ['Zone',zone.low==null?'--':`${money(zone.low)}-${money(zone.high)}`,'',`${zone.timeframe||'--'} ${zone.type||'--'}`],
+      ['BOS',bos.bos_level==null?'--':money(bos.bos_level),'blue',bos.bos_time||bos.reason||'--'],
+    ])}</div>
+    <div class="grid four" style="margin-top:10px">${metrics([
+      ['Entry',money(trade.entry),'',trade.entry_low!=null?`${money(trade.entry_low)}-${money(trade.entry_high)}`:'waiting'],
+      ['Stop',money(trade.stop),'short',trade.invalidates||'structural stop'],
+      ['Target',money(trade.target),'long',trade.target_source||'liquidity pool'],
+      ['RR / Size',`${trade.rr??'--'} / ${trade.position_1pct_10k_oz??'--'} oz`,'wait','1% risk on $10k'],
+    ])}</div>
+    <div class="grid four" style="margin-top:10px">${metrics([
+      ['Prev day H/L',`${money(prev.high)} / ${money(prev.low)}`,'','liquidity levels'],
+      ['Asian H/L',`${money(asian.high)} / ${money(asian.low)}`,'','00:00-07:00 UTC'],
+      ['Recent range',`${money(range.high)} / ${money(range.low)}`,'','premium/discount source'],
+      ['Failed',failed,'wait','active blockers'],
+    ])}</div>
+    <div class="scoreline">${checkRows}</div>
+    <div class="tiny muted" style="margin-top:8px">${esc(bot.source_note||'Clean-room strategy implementation.')} ${esc((zone||{}).summary||'')}</div>
+  </section>`;
+}
+
 function render(data){
   const final=data.final||{}, context=data.context||{}, macro=context.macro||{}, news=context.news||{}, people=context.people||{}, event=context.event_risk||{};
-  const next=event.next_event||{}, trade=final.trade||{}, sweep=final.sweep||{}, ws=final.weighted_scores||{}, weights=final.weights||{}, study=data.event_study||{}, gridBot=data.trend_grid_bot||{}, globalCatalysts=context.global_catalysts||news.global_catalysts||context.trade_catalyst||{};
+  const next=event.next_event||{}, trade=final.trade||{}, sweep=final.sweep||{}, ws=final.weighted_scores||{}, weights=final.weights||{}, study=data.event_study||{}, gridBot=data.trend_grid_bot||{}, fibBot=data.fib_ema_pullback||{}, ictBot=data.ict_bos_retracement||{}, globalCatalysts=context.global_catalysts||news.global_catalysts||context.trade_catalyst||{};
   const direction=final.direction||'WAIT', riskColor=impactCls(context.risk);
   const drivers=metrics((macro.drivers||[]).map(d=>[d.label,d.value==null?'--':d.value+(d.unit||''),d.score>0?'long':d.score<0?'short':'muted',`${d.move} ${pct(d.change_pct)}`]));
   const tradeMetrics=metrics([
@@ -6739,6 +9705,8 @@ function render(data){
     <div>${esc(s.title)}<div class="tiny muted">${esc(s.source||people.source||'public web')} · ${esc(s.reason||'')}</div></div>
     <div class="tiny ${biasCls(s.bias)}">${esc(s.bias||'neutral')}</div>
   </div>`).join('')||'<div class="muted small">Public-web sentiment feed unavailable.</div>';
+  const newsSummary=biasSummaryMetrics(news,news.headlines||[]);
+  const peopleSummary=biasSummaryMetrics(people,people.samples||[]);
   const catalystMetrics=metrics([
     ['Gold impact',`${globalCatalysts.bias||'MIXED'} ${globalCatalysts.score>0?'+':''}${globalCatalysts.score??0}`,biasCls(globalCatalysts.bias),globalCatalysts.assessment||globalCatalysts.reason||'No active catalyst'],
     ['USD impact',`${globalCatalysts.usd_bias||'MIXED'} ${globalCatalysts.usd_score>0?'+':''}${globalCatalysts.usd_score??0}`,biasCls(globalCatalysts.usd_bias),'inverse read used for gold pressure'],
@@ -6788,17 +9756,27 @@ function render(data){
     </section>
   </div>
 
+  ${renderDataHealth(data)}
+  ${renderPropFirm(data)}
+  ${renderWatchSetups(data)}
+
   <div class="section-title"><h2>Execution Playbook</h2><span class="muted small">${esc(sweep.summary||'Waiting for sweep')}</span></div>
   <div class="grid two">
     <section class="panel"><div class="grid four">${tradeMetrics}</div></section>
     <section class="panel"><div class="label">Next scheduled catalyst</div><div class="split"><div><b>${esc(next.name||'None')}</b><div class="small muted">${esc(next.period||'')} ${next.time_utc?'. '+esc(next.time_utc):''}</div><div class="playbook tiny">${esc(next.gold_playbook||'')}</div></div><div class="risk ${impactCls(event.level)}">${esc(next.eta||'')}</div></div></section>
   </div>
 
+  <div class="section-title"><h2>Fibonacci EMA Pullback Entry</h2><span class="muted small">M15/H1/H4 EMA alignment + 0.50-0.786 pullback zone</span></div>
+  ${renderFibBot(fibBot)}
+
+  <div class="section-title"><h2>H4 Daily BOS Retracement Entry</h2><span class="muted small">premium/discount OB-FVG + 5M BOS retrace + daily guardrails</span></div>
+  ${renderIctBot(ictBot)}
+
   <div class="section-title"><h2>EMA200 ADX ATR Grid Signal</h2><span class="muted small">trend-following, ATR-spaced, capped, non-martingale</span></div>
   ${renderGridBot(gridBot)}
 
-  <div class="section-title"><h2>Technical State</h2><span class="muted small">1H regime + 15M/5M liquidity sweep/reclaim</span></div>
-  <div class="grid three">${renderTf('h1',data)}${renderTf('m15',data)}${renderTf('m5',data)}</div>
+  <div class="section-title"><h2>Technical State</h2><span class="muted small">1H regime + 15M zone + 5M micro sweep/reclaim</span></div>
+  <div class="grid technical-grid">${renderTf('h1',data)}${renderTf('m15',data)}${renderTf('m5',data)}</div>
 
   <div class="section-title"><h2>Live News And Public Sentiment</h2><span class="muted small">${esc(context.timestamp||'')}</span></div>
   <section class="panel">
@@ -6807,8 +9785,8 @@ function render(data){
     <table style="margin-top:10px"><thead><tr><th>Region</th><th>Gold</th><th>USD</th><th>Impact</th><th>Headline / playbook</th></tr></thead><tbody>${catalystRows}</tbody></table>
   </section>
   <div class="grid two">
-    <section class="panel"><div class="label">Current market news impact</div>${newsRows}</section>
-    <section class="panel"><div class="label">People/public-web sentiment proxy</div>${peopleRows}</section>
+    <section class="panel"><div class="label">Current market news impact</div><div class="grid four" style="margin-top:10px;margin-bottom:10px">${newsSummary}</div>${newsRows}</section>
+    <section class="panel"><div class="label">People/public-web sentiment proxy</div><div class="grid four" style="margin-top:10px;margin-bottom:10px">${peopleSummary}</div>${peopleRows}</section>
   </div>
 
   <div class="section-title"><h2>Forward Event Tape</h2><span class="muted small">${esc(event.reason||'')}</span></div>
@@ -6827,7 +9805,7 @@ function render(data){
 }
 
 async function loadDashboard(force=false){
-  document.getElementById('status').textContent='searching live feeds...';
+  document.getElementById('status').textContent=force?'searching live feeds...':'loading cached state...';
   try{
     const response=await fetch(`/api/dashboard?refresh=${force ? '1' : '0'}&ts=${Date.now()}`);
     if(!response.ok)throw new Error('HTTP '+response.status);
@@ -6839,8 +9817,232 @@ async function loadDashboard(force=false){
     document.getElementById('app').innerHTML=`<div class="panel short">Dashboard error: ${esc(error.message)}</div>`;
   }
 }
-loadDashboard(true);
-setInterval(()=>loadDashboard(true),300000);
+loadDashboard(false);
+setInterval(()=>loadDashboard(false),300000);
+</script>
+</body>
+</html>"""
+
+LONDON_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b0b09">
+<title>London XAU/USD BOS</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b0b09;color:#ece7dc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1280px;margin:0 auto;padding:16px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:12px}
+h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.sub{font-size:12px;color:#9f9a8f;margin-top:4px}.stamp{font-size:12px;color:#9f9a8f;text-align:right}
+button,a.btn,.tablink{border:1px solid #494534;background:#171712;color:#ece7dc;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-block;margin-left:6px}button:hover,a.btn:hover,.tablink:hover{border-color:#b99036}button.danger{border-color:#73443d;color:#f0b4ac}button.mini{padding:5px 8px;margin:2px;font-size:11px}
+input{border:1px solid #494534;background:#10100c;color:#ece7dc;border-radius:6px;padding:8px 9px;max-width:170px}.tabs-nav{display:flex;gap:8px;margin:12px 0}.tablink{margin-left:0}.tablink.active{background:#2a2518;border-color:#b99036;color:#f2c76b}
+.panel{background:#141410;border:1px solid #2d2b22;border-radius:8px;padding:13px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}.grid{display:grid;gap:10px}.two{grid-template-columns:repeat(2,1fr)}.four{grid-template-columns:repeat(4,1fr)}
+.metric{background:#10100c;border:1px solid #28251d;border-radius:7px;padding:10px}.metric span{display:block;font-size:10px;color:#9f9a8f;text-transform:uppercase;letter-spacing:.13em}.metric b{display:block;font-size:20px;margin-top:4px;overflow-wrap:anywhere}
+.section-title{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:16px 0 8px}.section-title h2{font-size:12px;margin:0;text-transform:uppercase;letter-spacing:.14em;color:#d8d0bf}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}th,td{text-align:left;border-bottom:1px solid #2c2a21;padding:8px 6px;vertical-align:top}th{color:#9f9a8f;font-size:10px;text-transform:uppercase;letter-spacing:.1em}tr:last-child td{border-bottom:0}
+.long{color:#4ecb71}.short{color:#ef6a5b}.wait{color:#d7a93f}.blue{color:#6bb7d7}.muted{color:#9f9a8f}.tiny{font-size:11px}.reason{font-size:13px;color:#c9c0ae;line-height:1.45}.tf-title{font-size:28px;font-weight:900}.risk{font-size:26px;font-weight:900}.pill{border:1px solid #393528;background:#1b1a14;border-radius:999px;padding:5px 8px;font-size:11px;display:inline-block;margin:3px}.actions{display:flex;gap:6px;flex-wrap:wrap}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:900px){main{padding:11px}.top,.two,.four{grid-template-columns:1fr}.stamp{text-align:left}table{font-size:11px;display:block;overflow-x:auto;white-space:nowrap}}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>London XAU/USD BOS</h1>
+      <div class="sub">H4/Daily bias, premium-discount OB/FVG, 5M BOS retracement, London CT window only.</div>
+      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink active" href="/london">London</a><a class="tablink" href="/trades">Journal</a><a class="tablink" href="/ops">Ops</a></div>
+    </div>
+    <div class="stamp"><div id="status">loading...</div><input id="adminToken" type="password" placeholder="ADMIN_TOKEN"><button onclick="saveToken()">Save</button><button onclick="loadLondon(true)">Refresh</button></div>
+  </div>
+  <div class="panel">
+    <div class="actions">
+      <button onclick="loadLondon(true)">Signal</button>
+      <button onclick="runTelegramCheck()">Telegram Check</button>
+      <button onclick="runBacktest()">Backtest</button>
+      <button onclick="runMt5(true)">MT5 Dry Run</button>
+      <button class="danger" onclick="runMt5(false)">MT5 Demo Execute</button>
+    </div>
+    <div id="actionResult" class="tiny muted" style="margin-top:8px"></div>
+  </div>
+  <div id="app" style="margin-top:10px"><div class="panel">Loading London strategy...</div></div>
+  <div class="section-title"><h2>Backtest</h2><span class="muted tiny">GC=F 5M replay</span></div>
+  <div id="backtest" class="panel muted">No replay loaded.</div>
+</main>
+<script>
+const money=v=>v==null?'--':'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const dirCls=d=>(d||'').includes('LONG')?'long':(d||'').includes('SHORT')?'short':'wait';
+const statusCls=v=>v===true||v==='CONFIRMED'||v==='ONLINE'?'long':v===false||v==='BLOCKED'||v==='NO_DATA'?'short':'wait';
+const flagText=v=>v===true?'ON':v===false?'OFF':'--';
+const flagCls=v=>v===true?'long':v===false?'wait':'muted';
+
+function saveToken(){
+  const value=document.getElementById('adminToken').value.trim();
+  if(value)localStorage.setItem('xau_admin_token',value);
+  document.getElementById('status').textContent=value?'token saved':'token empty';
+}
+
+function token(){
+  return localStorage.getItem('xau_admin_token')||document.getElementById('adminToken').value.trim()||'';
+}
+
+function authHeaders(extra={}){
+  const adminToken=token();
+  return adminToken?{...extra,'Authorization':`Bearer ${adminToken}`}:{...extra};
+}
+
+async function fetchJson(path, options={}){
+  const response=await fetch(path,{...options,headers:{...authHeaders(options.headers||{})}});
+  const text=await response.text();
+  let data={};
+  try{data=JSON.parse(text)}catch(_){data={raw:text}}
+  if(!response.ok)throw new Error(data?.error?.message||data?.blockers?.join('; ')||data?.error||text.slice(0,220)||('HTTP '+response.status));
+  return data;
+}
+
+function metric(label,value,klass='',hint=''){
+  return `<div class="metric"><span>${esc(label)}</span><b class="${klass}">${value}</b><div class="tiny muted">${esc(hint)}</div></div>`;
+}
+
+function metrics(items){
+  return `<div class="grid four">${items.map(item=>metric(...item)).join('')}</div>`;
+}
+
+function renderSignal(bot, mt5){
+  const trade=bot.trade||{}, zone=bot.zone||{}, bias=bot.bias||{}, levels=bot.levels||{}, checks=bot.checks||{}, bos=bot.bos||{};
+  const prev=levels.previous_day||{}, asian=levels.asian||{}, range=levels.recent_range||{};
+  const checkRows=Object.entries(checks).map(([key,value])=>`<span class="pill">${esc(key.replaceAll('_',' '))} <b class="${value?'long':'short'}">${value?'YES':'NO'}</b></span>`).join('');
+  const blockers=(bot.failed_checks||[]).map(item=>`<tr><td>${esc(item.replaceAll('_',' '))}</td></tr>`).join('')||'<tr><td class="long">All London setup checks passed.</td></tr>';
+  const moduleState=mt5?.module_available?'ONLINE':'NO MODULE';
+  const connected=mt5?.connected?'CONNECTED':'OFFLINE';
+  document.getElementById('app').innerHTML=`
+    <div class="grid two">
+      <section class="panel">
+        <div class="section-title"><h2>London Signal</h2><span class="${dirCls(bot.direction)}">${esc(bot.quality||'WAIT')}</span></div>
+        <div class="tf-title ${dirCls(bot.signal)}">${esc(bot.signal||'WAIT')}</div>
+        <div class="reason">${esc(bot.reason||'')}</div>
+        ${metrics([
+          ['Bias',bot.direction||'NONE',dirCls(bot.direction),bias.reason||'H4/Daily filter'],
+          ['Session',bot.session||'--',bot.session==='LONDON_OPEN_CT'?'long':'wait',(bot.session_windows_ct||[]).join(', ')],
+          ['Zone',zone.low==null?'--':`${money(zone.low)}-${money(zone.high)}`,'',`${zone.timeframe||'--'} ${zone.type||'--'}`],
+          ['BOS',bos.bos_level==null?'--':money(bos.bos_level),'blue',bos.bos_time||bos.reason||'--'],
+        ])}
+        <div style="margin-top:10px">${metrics([
+          ['Entry',money(trade.entry),'',trade.entry_low!=null?`${money(trade.entry_low)}-${money(trade.entry_high)}`:'waiting'],
+          ['Stop',money(trade.stop),'short',trade.invalidates||'structural stop'],
+          ['Target',money(trade.target),'long',trade.target_source||'liquidity pool'],
+          ['RR / Size',`${trade.rr??'--'} / ${trade.position_1pct_10k_oz??'--'} oz`,'wait','1% risk on $10k'],
+        ])}</div>
+        <div style="margin-top:10px">${metrics([
+          ['Prev day H/L',`${money(prev.high)} / ${money(prev.low)}`,'','liquidity'],
+          ['Asian H/L',`${money(asian.high)} / ${money(asian.low)}`,'','session range'],
+          ['Recent range',`${money(range.high)} / ${money(range.low)}`,'','premium/discount'],
+          ['Model',bot.model||'--','wait','clean-room rules'],
+        ])}</div>
+        <div style="margin-top:8px">${checkRows}</div>
+        <table><thead><tr><th>Active blockers</th></tr></thead><tbody>${blockers}</tbody></table>
+      </section>
+      <section class="panel">
+        <div class="section-title"><h2>MT5 Demo Automation</h2><span class="${statusCls(mt5?.connected)}">${esc(connected)}</span></div>
+        ${metrics([
+          ['Module',moduleState,statusCls(mt5?.module_available),mt5?.error||'MetaTrader5 Python bridge'],
+          ['Autotrade',flagText(mt5?.autotrade_enabled),flagCls(mt5?.autotrade_enabled),`${mt5?.check_seconds??'--'}s worker`],
+          ['Manual execute',flagText(mt5?.manual_execution_enabled),flagCls(mt5?.manual_execution_enabled),'protected endpoint'],
+          ['Demo mode',flagText(mt5?.demo_mode),mt5?.demo_mode===false?'short':flagCls(mt5?.demo_mode),'real account guard'],
+        ])}
+        <div style="margin-top:10px">${metrics([
+          ['Symbol',mt5?.symbol||'--','','MT5 market watch symbol'],
+          ['Risk/trade',`${mt5?.risk_per_trade_pct??'--'}%`,'wait',`max ${mt5?.max_volume??'--'} lots`],
+          ['Account',mt5?.account?.login||'--','','trade mode '+(mt5?.account?.trade_mode??'--')],
+          ['Equity',money(mt5?.account?.equity),'',mt5?.account?.server||''],
+        ])}</div>
+        <table><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>
+          <tr><td class="mono">MT5_SYMBOL</td><td>${esc(mt5?.symbol||'--')}</td></tr>
+          <tr><td class="mono">MT5_MAGIC</td><td>${esc(mt5?.magic||'--')}</td></tr>
+          <tr><td class="mono">MT5_MAX_ENTRY_DRIFT_USD</td><td>${money(mt5?.max_entry_drift_usd)}</td></tr>
+          <tr><td class="mono">Session</td><td>${esc((mt5?.session_window_ct||[]).join(', ')||'02:00-05:00 CT')}</td></tr>
+        </tbody></table>
+      </section>
+    </div>`;
+}
+
+function renderBacktest(data){
+  const m=data.metrics||{}, s=data.settings||{}, rows=(data.trades||[]).slice(-12).reverse().map(t=>`<tr>
+    <td>${esc(t.entry_time)}</td>
+    <td class="${dirCls(t.direction)}">${esc(t.direction)}</td>
+    <td class="${t.result==='TP'?'long':t.result==='SL'?'short':'wait'}">${esc(t.result)}</td>
+    <td>${money(t.entry)}</td><td class="short">${money(t.stop)}</td><td class="long">${money(t.target)}</td>
+    <td class="${Number(t.r)>=0?'long':'short'}">${Number(t.r).toFixed(2)}R</td>
+    <td>${esc(t.zone_timeframe)} ${esc(t.zone_type)}</td>
+  </tr>`).join('')||'<tr><td colspan="8" class="muted">No trades.</td></tr>';
+  document.getElementById('backtest').innerHTML=`
+    ${metrics([
+      ['Trades',m.total_signals??0,'','London only'],
+      ['Win rate',`${m.win_rate??'--'}%`,Number(m.win_rate)>=50?'long':'short','closed trades'],
+      ['Net R',m.net_r??'--',Number(m.net_r)>=0?'long':'short',`avg ${m.avg_r??'--'}R`],
+      ['Profit factor',m.profit_factor??'--',Number(m.profit_factor)>=1.5?'long':'short',`DD ${m.max_drawdown_pct??'--'}%`],
+      ['Return',`${m.return_pct??'--'}%`,Number(m.return_pct)>=0?'long':'short',`final ${money(m.final_equity)}`],
+      ['Sessions',(s.sessions_ct||[]).join(', '),'wait',`${s.days??'--'} days`],
+      ['Risk',`${s.risk_per_trade_pct??'--'}%`,'wait',`max ${s.max_trades_per_day??'--'} trades/day`],
+      ['Sample',data.sampling?.checked_bars??'--','','checked 5M bars'],
+    ])}
+    <table><thead><tr><th>Entry time</th><th>Side</th><th>Result</th><th>Entry</th><th>SL</th><th>TP</th><th>R</th><th>Zone</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="tiny muted" style="margin-top:8px">${esc(data.disclaimer||'Research backtest only.')}</div>`;
+}
+
+async function loadLondon(force=false){
+  document.getElementById('status').textContent=force?'refreshing...':'loading...';
+  try{
+    const signal=await fetchJson(`/api/strategy/ict-london-bos?refresh=${force?'1':'0'}&ts=${Date.now()}`);
+    let mt5={};
+    try{mt5=await fetchJson(`/api/mt5/status?include_account=true&ts=${Date.now()}`)}catch(error){mt5={module_available:false,connected:false,error:error.message}}
+    renderSignal(signal,mt5);
+    document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
+  }catch(error){
+    document.getElementById('status').textContent='error';
+    document.getElementById('app').innerHTML=`<div class="panel short">${esc(error.message)}</div>`;
+  }
+}
+
+async function runBacktest(){
+  document.getElementById('actionResult').textContent='running London replay...';
+  try{
+    const data=await fetchJson(`/api/backtest/ict-london-bos?days=60&max_checks=20000&risk_per_trade_pct=1&ts=${Date.now()}`);
+    renderBacktest(data);
+    document.getElementById('actionResult').textContent=`London replay: ${data.metrics?.total_signals??0} trades, ${data.metrics?.win_rate??'--'}% win rate, ${data.metrics?.net_r??'--'}R.`;
+  }catch(error){
+    document.getElementById('actionResult').textContent=error.message;
+  }
+}
+
+async function runTelegramCheck(){
+  document.getElementById('actionResult').textContent='checking London Telegram signal...';
+  try{
+    const data=await fetchJson(`/api/london/check-now?ts=${Date.now()}`,{method:'POST'});
+    const blockers=(data.blockers||[]).join(', ');
+    const status=data.sent?'sent':data.already_recorded?'already recorded':'not sent';
+    document.getElementById('actionResult').textContent=`Telegram ${status} · ${data.signal?.signal||'WAIT'}${blockers?' · '+blockers:''}`;
+    await loadLondon(false);
+  }catch(error){
+    document.getElementById('actionResult').textContent=error.message;
+  }
+}
+
+async function runMt5(dryRun){
+  document.getElementById('actionResult').textContent=dryRun?'checking MT5 dry run...':'sending demo order...';
+  try{
+    const data=await fetchJson(`/api/mt5/london-execute?dry_run=${dryRun?'true':'false'}&refresh=true&ts=${Date.now()}`,{method:'POST'});
+    const size=data.sizing?.volume??'--';
+    const result=data.mt5_result?.retcode?` retcode ${data.mt5_result.retcode}`:'';
+    document.getElementById('actionResult').textContent=`${dryRun?'Dry run':'Demo execute'} ${data.ok?'OK':'blocked'} · ${data.signal?.signal||'WAIT'} · ${size} lots${result}`;
+    await loadLondon(false);
+  }catch(error){
+    document.getElementById('actionResult').textContent=error.message;
+  }
+}
+
+document.getElementById('adminToken').value=localStorage.getItem('xau_admin_token')||'';
+loadLondon(false);
 </script>
 </body>
 </html>"""
@@ -6872,9 +10074,9 @@ table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}th,td{t
     <div>
       <h1>XAU/USD Trade Journal</h1>
       <div class="sub">Executed alert record with TP/SL outcome tracking from the alert execution timeframe.</div>
-      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink active" href="/trades">Journal</a><a class="tablink" href="/ops">Ops</a></div>
+      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink" href="/london">London</a><a class="tablink active" href="/trades">Journal</a><a class="tablink" href="/ops">Ops</a></div>
     </div>
-    <div class="stamp"><div id="status">loading...</div><input id="adminToken" type="password" placeholder="ADMIN_TOKEN"><button onclick="saveToken()">Save</button><button onclick="loadTrades(true)">Refresh</button><a class="btn" href="/">Cockpit</a><a class="btn" href="/ops">Ops</a></div>
+    <div class="stamp"><div id="status">loading...</div><input id="adminToken" type="password" placeholder="ADMIN_TOKEN"><button onclick="saveToken()">Save</button><button onclick="loadTrades(true)">Refresh</button><a class="btn" href="/">Cockpit</a><a class="btn" href="/london">London</a><a class="btn" href="/ops">Ops</a></div>
   </div>
   <div id="app" class="panel">Loading trade journal...</div>
 </main>
@@ -6996,7 +10198,7 @@ table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}th,td{t
     <div>
       <h1>AURUM Ops</h1>
       <div class="sub">Readiness, model health, notification tests, and protected maintenance actions.</div>
-      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink" href="/trades">Journal</a><a class="tablink active" href="/ops">Ops</a></div>
+      <div class="tabs-nav"><a class="tablink" href="/">Cockpit</a><a class="tablink" href="/london">London</a><a class="tablink" href="/trades">Journal</a><a class="tablink active" href="/ops">Ops</a></div>
     </div>
     <div class="stamp"><div id="status">loading...</div><input id="adminToken" type="password" placeholder="ADMIN_TOKEN"><button onclick="saveToken()">Save</button><button onclick="loadOps()">Refresh</button></div>
   </div>
@@ -7192,6 +10394,10 @@ loadOps();
 @app.get("/trades", response_class=HTMLResponse)
 def trades_page():
     return HTMLResponse(TRADES_HTML)
+
+@app.get("/london", response_class=HTMLResponse)
+def london_page():
+    return HTMLResponse(LONDON_HTML)
 
 @app.get("/ops", response_class=HTMLResponse)
 def ops_page():

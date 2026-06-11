@@ -71,11 +71,13 @@ services:
       - key: ADMIN_TOKEN
         sync: false
       - key: TRADE_CHECK_SECONDS
-        value: 900
+        value: 300
+      - key: TRADE_STARTUP_DELAY_SECONDS
+        value: 5
       - key: HARD_FILTERS_ENABLED
         value: true
       - key: RECENT_SIGNAL_COOLDOWN_MINUTES
-        value: 120
+        value: 60
       - key: MAX_SPREAD_CENTS
         value: 30
       - key: XAUUSD_SPREAD_CENTS
@@ -84,6 +86,68 @@ services:
         value: 90
       - key: SIGNAL_INVALIDATION_ATR_BUFFER
         value: 0.20
+      - key: SIGNAL_CACHE_TTL_SECONDS
+        value: 60
+      - key: WATCH_ALERTS_ENABLED
+        value: true
+      - key: WATCH_CHECK_SECONDS
+        value: 300
+      - key: WATCH_STARTUP_DELAY_SECONDS
+        value: 15
+      - key: WATCH_ALERT_COOLDOWN_MINUTES
+        value: 30
+      - key: WATCH_MIN_CONDITIONS
+        value: 4
+      - key: PROP_MODE_ENABLED
+        value: true
+      - key: PROP_FIRM_NAME
+        value: Generic Prop Firm
+      - key: PROP_ACCOUNT_SIZE
+        value: 100000
+      - key: PROP_PROFIT_TARGET_PCT
+        value: 10
+      - key: PROP_MAX_DAILY_LOSS_PCT
+        value: 5
+      - key: PROP_MAX_TOTAL_DRAWDOWN_PCT
+        value: 10
+      - key: PROP_RISK_PER_TRADE_PCT
+        value: 0.50
+      - key: PROP_PROTECT_RISK_PER_TRADE_PCT
+        value: 0.25
+      - key: PROP_MAX_DAILY_RISK_PCT
+        value: 1.00
+      - key: PROP_MIN_RR
+        value: 2.00
+      - key: PROP_MIN_CONFIDENCE
+        value: 70
+      - key: PROP_MAX_TRADES_PER_DAY
+        value: 3
+      - key: PROP_MAX_LOSSES_PER_DAY
+        value: 2
+      - key: PROP_ALLOW_COUNTERTREND
+        value: false
+      - key: LIQUIDITY_SWEEP_SCAN_BARS_5M
+        value: 12
+      - key: LIQUIDITY_SWEEP_SCAN_BARS_15M
+        value: 6
+      - key: LIQUIDITY_SWEEP_SCAN_BARS_1H
+        value: 3
+      - key: ORDER_BLOCK_IMPULSE_ATR
+        value: 1.90
+      - key: ORDER_BLOCK_MIN_SCORE
+        value: 55
+      - key: ORDER_BLOCK_TESTED_MIN_SCORE
+        value: 55
+      - key: ORDER_BLOCK_TEST_TOLERANCE_ATR
+        value: 0.30
+      - key: TECHNICAL_SIGNAL_THRESHOLD_5M
+        value: 58
+      - key: TECHNICAL_SIGNAL_THRESHOLD_15M
+        value: 62
+      - key: TECHNICAL_SIGNAL_THRESHOLD_1H
+        value: 62
+      - key: STACK_H1_BIAS_MIN_SCORE
+        value: 10
       - key: GO_LIVE_MIN_CLOSED_SIGNALS
         value: 50
       - key: GO_LIVE_MIN_WIN_RATE
